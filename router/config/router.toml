@@ -11,6 +11,8 @@
 
 [server]
 port = 8080
+# Used only for subgraph names with no entry in `[timeouts]` and not listed in
+# the Phase 4.1 default map (`property`, `pricing`, `booking`, `review`, `user`).
 default_subgraph_timeout_ms = 1000
 
 [supergraph]
@@ -21,5 +23,45 @@ path = "/app/supergraph/supergraph.graphql"
 
 # Per-subgraph timeout overrides (milliseconds). Subgraph names match the
 # `name:` argument of `@join__graph(...)` inside the supergraph SDL.
+# Defaults when omitted are: property 300, pricing 500, booking 700, review 500, user 500.
 [timeouts]
 # pricing = 1500
+
+# ---- Phase 4.1: HTTP client pool / keep-alive --------------------------------
+[http_client]
+pool_max_idle_per_host = 50
+pool_idle_timeout_sec = 90
+tcp_keepalive_sec = 90
+
+# Phase 4.1: retries + sliding-window circuit breaker
+[reliability]
+retry_max_attempts = 2
+retry_initial_backoff_ms = 10
+retry_max_backoff_ms = 250
+circuit_window_sec = 60
+circuit_min_samples = 8
+circuit_failure_ratio = 0.5
+circuit_open_recovery_sec = 15
+
+# Phase 4.2: Redis response cache (enable in prod via ROUTER_CACHE_ENABLED / ROUTER_REDIS_URL)
+[cache]
+enabled = false
+redis_url = "redis://127.0.0.1:6379"
+identity_header = "x-user-id"
+ttl_property_read_sec = 600
+ttl_search_sec = 120
+ttl_pricing_sec = 30
+ttl_review_summary_sec = 300
+
+# Phase 4.3
+[limits]
+max_depth = 10
+max_cost = 1000
+
+# Phase 4.4: apollographql-client-name header
+[rate_limit]
+default_requests_per_sec = 100
+default_burst = 100
+# Example per-client override (inline tables as map values):
+# [rate_limit.clients]
+# mobile = { requests_per_sec = 200, burst = 200 }

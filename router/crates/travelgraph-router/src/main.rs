@@ -7,16 +7,24 @@
 //!   * [`plan`]        - supergraph-aware query planner (Phase 3.3 / 3.4).
 //!   * [`execute`]     - initial fetch + batched `_entities` executor.
 //!   * [`merge`]       - response stitcher (Phase 3.4).
-//!   * [`logging`]     - request-scoped span helpers.
-//!   * [`server`]      - axum router wiring everything together.
+//!   * [`cache`]       - Redis response cache (Phase 4.2).
+//!   * [`metrics`]     - Prometheus recorder (Phase 4.2 / 4.4).
+//!   * [`limits`]      - depth + complexity limits (Phase 4.3).
+//!   * [`rate_limit`]  - per-client governor buckets (Phase 4.4).
+//!   * [`reliability`] - subgraph tower dispatch: timeout, retry, breaker (4.1).
 
+mod cache;
 mod config;
 mod error;
 mod execute;
 mod graphql;
+mod limits;
 mod logging;
 mod merge;
+mod metrics;
 mod plan;
+mod rate_limit;
+mod reliability;
 mod server;
 mod supergraph;
 
@@ -29,6 +37,7 @@ use tracing_subscriber::EnvFilter;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     init_tracing();
+    metrics::init_prometheus().context("prometheus metrics")?;
 
     let config = config::Config::load().context("loading router config")?;
     tracing::info!(

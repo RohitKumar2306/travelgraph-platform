@@ -32,6 +32,9 @@ pub struct SupergraphCatalog {
     pub root_mutation_fields: HashMap<String, String>,
     /// Entity-shaped object types, keyed by GraphQL type name.
     pub entity_types: HashMap<String, EntityType>,
+    /// Per-field cost overrides from `@cost(value: Int)` on the supergraph.
+    /// Key: `Query.fieldName` or `Mutation.fieldName`.
+    pub field_cost_overrides: HashMap<String, i32>,
 }
 
 #[derive(Debug, Clone)]
@@ -102,12 +105,14 @@ pub fn parse(sdl: &str) -> Result<SupergraphCatalog, SupergraphError> {
     let subgraphs = collect_subgraphs(&document)?;
     let entity_types = collect_entity_types(&document, &subgraphs)?;
     let (root_query_fields, root_mutation_fields) = collect_root_fields(&document)?;
+    let field_cost_overrides = collect_field_costs(&document);
 
     Ok(SupergraphCatalog {
         subgraphs,
         root_query_fields,
         root_mutation_fields,
         entity_types,
+        field_cost_overrides,
     })
 }
 
@@ -343,6 +348,46 @@ fn collect_root_fields(
         }
     }
     Ok((query, mutation))
+}
+
+/// Collect `@cost(value: N)` overrides from Query / Mutation fields in the
+/// composed supergraph SDL.
+fn collect_field_costs(document: &Document) -> HashMap<String, i32> {
+    let mut out = HashMap::new();
+    for def in &document.definitions {
+        let Definition::ObjectTypeDefinition(obj) = def else { continue };
+        let parent = obj.name.as_str();
+        if !matches!(parent, "Query" | "Mutation") {
+            continue;
+        }
+        for field in &obj.fields {
+            if field.name.as_str() == "_service" || field.name.as_str() == "_entities" {
+                continue;
+            }
+            if let Some(cost) = cost_from_directives(&field.directives) {
+                out.insert(format!("{parent}.{}", field.name.as_str()), cost);
+            }
+        }
+    }
+    out
+}
+
+fn cost_from_directives(directives: &apollo_compiler::ast::DirectiveList) -> Option<i32> {
+    for d in directives.iter() {
+        if d.name.as_str() != "cost" {
+            continue;
+        }
+        for arg in &d.arguments {
+            if arg.name.as_str() != "value" {
+                continue;
+            }
+            return match &*arg.value {
+                Value::Int(i) => i.as_str().parse::<i32>().ok(),
+                _ => None,
+            };
+        }
+    }
+    None
 }
 
 // ---- helpers --------------------------------------------------------------

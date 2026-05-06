@@ -1,26 +1,14 @@
-//! Plan executor.
-//!
-//! Drives an [`ExecutionPlan`] in two phases per top-level field:
-//!
-//!   1. **Initial fetch** - one parallel call per top-level `FieldFetch`,
-//!      hitting the field's owning subgraph.
-//!   2. **Entity fetches** - once the initial response is in, each owning
-//!      `FieldFetch` fans out one parallel `_entities` call per extending
-//!      subgraph with **all** the entity ids in a single batched
-//!      `representations` array (the "1 batched call per subgraph"
-//!      guarantee from Phase 3.4).
-//!
-//! Across the entire request the network shape is therefore:
-//!
-//!   * top-level fields:     N parallel initial calls
-//!   * for each entity-shaped field with extenders: 1 batched call per
-//!     extending subgraph (also parallel within that field)
+//! Plan executor (Phase 3 + 4): uses [`crate::reliability::SubgraphClient`] for
+//! tower [`Service`]-backed subgraph calls.
 
 use crate::error::SubgraphError;
 use crate::graphql::types::GraphQLResponse;
-use crate::plan::{EntityFetch, ExecutionPlan, FieldFetch, InitialFetch};
+use crate::plan::{EntityFetch, ExecutionPlan, FieldFetch, InitialFetch, OperationKind};
+use crate::reliability::SubgraphClient;
+use crate::reliability::SubgraphHttpCall;
 use futures::future::join_all;
 use serde_json::{Map, Value};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Debug)]
@@ -34,16 +22,11 @@ pub struct InitialFetchResult {
 pub struct EntityFetchResult {
     pub plan: EntityFetch,
     pub duration: Duration,
-    /// Entity references the executor sent. Currently unused by the merger
-    /// (which aligns `_entities` results by DFS-walk index), but retained
-    /// so logs and debug tooling can correlate request-side IDs with
-    /// response-side enrichments.
     #[allow(dead_code)]
     pub representations: Vec<EntityRef>,
     pub outcome: Result<GraphQLResponse, SubgraphError>,
 }
 
-/// Single entity reference, e.g. `{__typename: "Property", id: "uuid"}`.
 #[derive(Debug, Clone)]
 pub struct EntityRef {
     pub typename: String,
@@ -62,12 +45,15 @@ pub async fn execute(
     plan: ExecutionPlan,
     variables: Value,
     operation_name: Option<String>,
-    http: reqwest::Client,
+    client: Arc<SubgraphClient>,
 ) -> Vec<FieldFetchResult> {
-    let futures = plan
-        .field_fetches
-        .into_iter()
-        .map(|f| execute_field(f, variables.clone(), operation_name.clone(), http.clone()));
+    let op = plan.operation_kind;
+    let futures = plan.field_fetches.into_iter().map(|f| {
+        let vars = variables.clone();
+        let op_name = operation_name.clone();
+        let c = client.clone();
+        async move { execute_field(f, vars, op_name, op, c).await }
+    });
     join_all(futures).await
 }
 
@@ -75,20 +61,21 @@ async fn execute_field(
     field: FieldFetch,
     variables: Value,
     operation_name: Option<String>,
-    http: reqwest::Client,
+    op_kind: OperationKind,
+    client: Arc<SubgraphClient>,
 ) -> FieldFetchResult {
-    // ---- Stage 1: initial fetch ------------------------------------------
     let init_start = Instant::now();
     let pruned_vars = subset_variables(&variables, &field.initial.variable_names);
-    let init_outcome = dispatch(
-        &field.initial.url,
-        &field.initial.query_text,
-        &pruned_vars,
-        operation_name.as_deref(),
-        field.initial.timeout,
-        &http,
-    )
-    .await;
+    let body = build_body(&field.initial.query_text, &pruned_vars, operation_name.as_deref());
+    let init_outcome = client
+        .send(SubgraphHttpCall {
+            subgraph: field.initial.subgraph.clone(),
+            url: field.initial.url.clone(),
+            body,
+            timeout: field.initial.timeout,
+            operation: op_kind,
+        })
+        .await;
     let init_duration = init_start.elapsed();
     let initial = InitialFetchResult {
         plan: field.initial.clone(),
@@ -96,9 +83,6 @@ async fn execute_field(
         outcome: init_outcome,
     };
 
-    // ---- Stage 2: entity fetches -----------------------------------------
-    // Skip if there are no extenders or the initial call failed (we have no
-    // entity ids to batch).
     if field.entity_fetches.is_empty() {
         return FieldFetchResult { field, initial, entities: Vec::new() };
     }
@@ -107,10 +91,7 @@ async fn execute_field(
         Ok(resp) => extract_entity_refs(
             resp.data.as_ref(),
             &field.response_key,
-            field
-                .entity_type
-                .as_deref()
-                .unwrap_or("Unknown"),
+            field.entity_type.as_deref().unwrap_or("Unknown"),
             field
                 .entity_fetches
                 .first()
@@ -136,50 +117,46 @@ async fn execute_field(
         })
         .collect();
 
-    let entity_futures = field
-        .entity_fetches
-        .iter()
-        .cloned()
-        .map(|ef| {
-            let representations = representations.clone();
-            let entity_refs = entity_refs.clone();
-            let http = http.clone();
-            async move {
-                let query = format!(
-                    "query($representations: [_Any!]!) {{ _entities(representations: $representations) {{ ... on {ty} {{ {body} }} }} }}",
-                    ty = ef.type_name,
-                    body = ef.fragment_body,
-                );
-                let vars = Value::Object({
-                    let mut m = Map::new();
-                    m.insert("representations".to_string(), Value::Array(representations));
-                    m
-                });
-                let start = Instant::now();
-                let outcome = dispatch(&ef.url, &query, &vars, None, ef.timeout, &http).await;
-                EntityFetchResult {
-                    plan: ef,
-                    duration: start.elapsed(),
-                    representations: entity_refs,
-                    outcome,
-                }
+    let entity_futures = field.entity_fetches.iter().cloned().map(|ef| {
+        let representations = representations.clone();
+        let entity_refs = entity_refs.clone();
+        let c = client.clone();
+        async move {
+            let query = format!(
+                "query($representations: [_Any!]!) {{ _entities(representations: $representations) {{ ... on {ty} {{ {body} }} }} }}",
+                ty = ef.type_name,
+                body = ef.fragment_body,
+            );
+            let vars = Value::Object({
+                let mut m = Map::new();
+                m.insert("representations".to_string(), Value::Array(representations));
+                m
+            });
+            let body_bytes = build_body(&query, &vars, None);
+            let start = Instant::now();
+            let outcome = c
+                .send(SubgraphHttpCall {
+                    subgraph: ef.subgraph.clone(),
+                    url: ef.url.clone(),
+                    body: body_bytes,
+                    timeout: ef.timeout,
+                    operation: OperationKind::Query,
+                })
+                .await;
+            EntityFetchResult {
+                plan: ef,
+                duration: start.elapsed(),
+                representations: entity_refs,
+                outcome,
             }
-        });
+        }
+    });
     let entities = join_all(entity_futures).await;
 
     FieldFetchResult { field, initial, entities }
 }
 
-// ---- HTTP dispatch --------------------------------------------------------
-
-async fn dispatch(
-    url: &str,
-    query: &str,
-    variables: &Value,
-    operation_name: Option<&str>,
-    timeout: Duration,
-    http: &reqwest::Client,
-) -> Result<GraphQLResponse, SubgraphError> {
+fn build_body(query: &str, variables: &Value, operation_name: Option<&str>) -> Vec<u8> {
     let mut body = serde_json::json!({
         "query": query,
         "variables": variables,
@@ -189,40 +166,9 @@ async fn dispatch(
             map.insert("operationName".to_owned(), Value::String(op.to_owned()));
         }
     }
-
-    let request = http
-        .post(url)
-        .header("content-type", "application/json")
-        .body(serde_json::to_vec(&body).expect("subgraph body must serialize"));
-    let result = tokio::time::timeout(timeout, request.send()).await;
-
-    let response = match result {
-        Err(_elapsed) => return Err(SubgraphError::Timeout(timeout)),
-        Ok(Err(e)) => return Err(SubgraphError::Transport(e.to_string())),
-        Ok(Ok(r)) => r,
-    };
-    let status = response.status();
-    let bytes = response
-        .bytes()
-        .await
-        .map_err(|e| SubgraphError::Transport(e.to_string()))?;
-    if !status.is_success() {
-        return Err(SubgraphError::BadStatus {
-            status: status.as_u16(),
-            body: String::from_utf8_lossy(&bytes).into_owned(),
-        });
-    }
-    serde_json::from_slice::<GraphQLResponse>(&bytes)
-        .map_err(|e| SubgraphError::Decode(e.to_string()))
+    serde_json::to_vec(&body).expect("subgraph body must serialize")
 }
 
-// ---- helpers --------------------------------------------------------------
-
-/// Reduce the inbound request's variables map down to the subset actually
-/// referenced by a synthesized subgraph operation. Subgraphs reject
-/// "variable defined but unused" per GraphQL spec rule 5.8.4, and conversely
-/// a variable used but missing from the map blows up validation in the
-/// downstream service.
 fn subset_variables(variables: &Value, names: &[String]) -> Value {
     if names.is_empty() {
         return Value::Object(Map::new());
@@ -239,9 +185,6 @@ fn subset_variables(variables: &Value, names: &[String]) -> Value {
     Value::Object(out)
 }
 
-/// Walk the initial response to extract entity references (each entity's
-/// `__typename` + key field) in DFS order. The merger walks the response in
-/// the same order to map `_entities` results back by index.
 pub(crate) fn extract_entity_refs(
     data: Option<&Value>,
     response_key: &str,

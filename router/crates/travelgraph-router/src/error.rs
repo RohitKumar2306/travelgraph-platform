@@ -14,4 +14,6 @@ pub enum SubgraphError {
     Transport(String),
     #[error("could not deserialize subgraph response: {0}")]
     Decode(String),
+    #[error("circuit breaker open for this subgraph (retry after {retry_after:?})")]
+    CircuitOpen { retry_after: Duration },
 }

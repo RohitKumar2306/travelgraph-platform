@@ -224,6 +224,10 @@ fn describe(err: &SubgraphError) -> (String, &'static str) {
             format!("Subgraph returned an undecodable response: {msg}."),
             "SUBGRAPH_DECODE_ERROR",
         ),
+        SubgraphError::CircuitOpen { .. } => (
+            "Subgraph circuit breaker is open; upstream calls are temporarily skipped.".into(),
+            "SUBGRAPH_CIRCUIT_OPEN",
+        ),
     }
 }
 

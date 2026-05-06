@@ -1,21 +1,17 @@
 //! HTTP wiring for the router.
 //!
-//! Two endpoints:
+//! Endpoints:
 //!
-//!   * `GET  /health`  -> 200 OK, used by docker / k8s healthchecks.
-//!   * `POST /graphql` -> the full pipeline:
-//!         parse -> validate -> plan (supergraph-aware) -> execute -> merge.
-//!
-//! Status code rules:
-//!
-//!   * Parse failure        -> HTTP 400 (per Phase 2.2 prompt).
-//!   * Validation failure   -> HTTP 200 + errors (GraphQL-over-HTTP spec).
-//!   * Routing/exec failure -> HTTP 200 + per-field error (Phase 2.4 policy
-//!                              preserved across Phase 3).
+//!   * `GET  /health`  -> 200 OK
+//!   * `GET  /metrics` -> Prometheus exposition
+//!   * `POST /graphql` -> rate limit → parse → validate → cache (optional) →
+//!         depth/cost limits → plan → execute → merge → cache set
 
 use axum::{
+    body::Body,
     extract::State,
-    http::StatusCode,
+    http::{header, HeaderMap, Request, StatusCode},
+    middleware::Next,
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -25,62 +21,131 @@ use std::time::{Duration, Instant};
 use tower_http::trace::TraceLayer;
 use tracing::Instrument;
 
+use crate::cache::{self, ResponseCache};
 use crate::config::Config;
 use crate::execute::execute;
 use crate::graphql::types::{GraphQLRequest, GraphQLResponse};
 use crate::graphql::{parse, validate};
+use crate::limits::analyze_cost;
 use crate::logging::{open_request_span, record_request_completion};
 use crate::merge::merge;
 use crate::plan::plan_operation;
+use crate::plan::OperationKind;
+use crate::rate_limit::ClientRateLimiter;
+use crate::reliability::{breakers_for_subgraphs, CircuitBreakerConfig, SubgraphClient};
 use crate::supergraph::SupergraphCatalog;
 
 #[derive(Clone)]
 pub struct AppState {
-    /// Held mainly so the auth phase can read settings off it later.
-    #[allow(dead_code)]
     pub config: Arc<Config>,
     pub catalog: Arc<SupergraphCatalog>,
-    pub http: reqwest::Client,
+    pub subgraph: Arc<SubgraphClient>,
+    pub cache: Option<Arc<ResponseCache>>,
+    pub rate_limit: Arc<ClientRateLimiter>,
 }
 
 pub async fn build(config: Config) -> anyhow::Result<Router> {
-    // Phase 3: load the composed supergraph and build a [`SupergraphCatalog`]
-    // describing entity ownership and field-level subgraph routing. Replaces
-    // Phase 2.3's hand-coded `SubgraphRegistry`.
     let mut catalog = crate::supergraph::load_from_file(&config.supergraph.path)?;
     apply_timeout_overrides(&mut catalog, &config);
 
     let http = reqwest::Client::builder()
-        // Each subgraph call additionally times out via tokio::time::timeout
-        // in the executor. The connect timeout below stops a misconfigured URL
-        // from blocking the entire pool.
         .connect_timeout(Duration::from_millis(500))
-        .pool_idle_timeout(Duration::from_secs(30))
-        .pool_max_idle_per_host(16)
+        .pool_max_idle_per_host(config.http_client.pool_max_idle_per_host)
+        .pool_idle_timeout(config.http_pool_idle_timeout())
+        .tcp_keepalive(config.http_tcp_keepalive())
         .build()?;
 
+    let brk_cfg = CircuitBreakerConfig {
+        window: Duration::from_secs(config.reliability.circuit_window_sec),
+        min_samples: config.reliability.circuit_min_samples,
+        failure_ratio: config.reliability.circuit_failure_ratio,
+        recovery: Duration::from_secs(config.reliability.circuit_open_recovery_sec),
+    };
+    let breakers = Arc::new(breakers_for_subgraphs(
+        catalog.subgraphs.keys().cloned(),
+        brk_cfg,
+    ));
+    let subgraph = Arc::new(SubgraphClient::new(http, breakers, &config.reliability));
+
+    let cache = if config.cache.enabled && !config.cache.redis_url.is_empty() {
+        Some(
+            ResponseCache::connect(&config.cache)
+                .await?
+                .into_shared(),
+        )
+    } else {
+        None
+    };
+
+    let rate_limit_cfg = config.rate_limit.clone();
     let state = AppState {
         config: Arc::new(config),
         catalog: Arc::new(catalog),
-        http,
+        subgraph,
+        cache,
+        rate_limit: Arc::new(ClientRateLimiter::new(&rate_limit_cfg)),
     };
 
+    let rl = state.clone();
     let app = Router::new()
         .route("/health", get(health))
-        .route("/graphql", post(graphql))
+        .route(
+            "/metrics",
+            get(|| async { metrics_text() }),
+        )
+        .route(
+            "/graphql",
+            post(graphql)
+                .layer(axum::middleware::from_fn_with_state(rl, rate_limit_middleware)),
+        )
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
     Ok(app)
 }
 
-fn apply_timeout_overrides(catalog: &mut SupergraphCatalog, config: &Config) {
-    let default = Duration::from_millis(config.server.default_subgraph_timeout_ms);
+fn merge_timeout_defaults(cfg: &Config) -> std::collections::HashMap<String, u64> {
+    let mut m = crate::config::default_subgraph_timeouts_ms();
+    for (k, v) in &cfg.timeouts {
+        m.insert(k.clone(), *v);
+    }
+    m
+}
+
+fn apply_timeout_overrides(catalog: &mut SupergraphCatalog, cfg: &Config) {
+    let defaults = merge_timeout_defaults(cfg);
+    let fallback = cfg.server.default_subgraph_timeout_ms;
     for (name, route) in catalog.subgraphs.iter_mut() {
-        let override_ms = config.timeouts.get(name).copied();
-        route.timeout = override_ms
-            .map(Duration::from_millis)
-            .unwrap_or(default);
+        let ms = defaults.get(name).copied().unwrap_or(fallback);
+        route.timeout = Duration::from_millis(ms);
+    }
+}
+
+fn metrics_text() -> impl IntoResponse {
+    ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], crate::metrics::render_prometheus())
+}
+
+async fn rate_limit_middleware(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    request: Request<Body>,
+    next: Next,
+) -> axum::response::Response {
+    let client = headers
+        .get("apollographql-client-name")
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("__anonymous__");
+    match state.rate_limit.check(client) {
+        Ok(()) => next.run(request).await,
+        Err(wait) => {
+            crate::metrics::record_rate_limited(client);
+            let secs = wait.as_secs().max(1);
+            axum::response::Response::builder()
+                .status(StatusCode::TOO_MANY_REQUESTS)
+                .header(header::RETRY_AFTER, secs.to_string())
+                .body(Body::from("rate limit exceeded"))
+                .unwrap()
+        }
     }
 }
 
@@ -92,6 +157,7 @@ async fn health() -> impl IntoResponse {
 
 async fn graphql(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<GraphQLRequest>,
 ) -> impl IntoResponse {
     let span_guard = open_request_span(req.operation_name.as_deref());
@@ -100,6 +166,13 @@ async fn graphql(
 
     async move {
         let start = Instant::now();
+        let identity_header = state.config.cache.identity_header.as_str();
+        let identity = headers
+            .get(identity_header)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(ToOwned::to_owned);
 
         // ---- parse (Phase 2.2) ---------------------------------------------
         let parsed = match parse::parse(&req.query) {
@@ -127,6 +200,45 @@ async fn graphql(
             return (StatusCode::OK, Json(body)).into_response();
         }
 
+        // ---- Redis cache (read path, Phase 4.2) ---------------------------
+        if let (Some(id), Some(cache)) = (identity.as_deref(), state.cache.as_ref()) {
+            if cache.enabled() {
+                let key = ResponseCache::cache_key(
+                    &req.query,
+                    req.operation_name.as_deref(),
+                    &req.variables,
+                    id,
+                );
+                match cache::try_get(Some(cache), &key).await {
+                    Ok(Some(bytes)) => match serde_json::from_slice::<GraphQLResponse>(&bytes) {
+                        Ok(resp) => {
+                            tracing::info!(cache = "hit", key = %key, "graphql response cache");
+                            return (StatusCode::OK, Json(resp)).into_response();
+                        }
+                        Err(e) => tracing::warn!(key = %key, %e, "cache entry decode failed"),
+                    },
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(key = %key, %e, "redis GET failed; continuing"),
+                }
+            }
+        }
+
+        // ---- depth / complexity (Phase 4.3) -------------------------------
+        if let Err(e) = analyze_cost(
+            &parsed.document,
+            req.operation_name.as_deref(),
+            &state.catalog,
+            state.config.limits.max_depth,
+            state.config.limits.max_cost,
+        ) {
+            let body = GraphQLResponse {
+                data: None,
+                errors: vec![e.into_graphql()],
+                extensions: None,
+            };
+            return (StatusCode::OK, Json(body)).into_response();
+        }
+
         // ---- plan against the supergraph (Phase 3.3) -----------------------
         let plan = match plan_operation(
             &parsed.document,
@@ -144,20 +256,17 @@ async fn graphql(
             }
         };
 
-        // Surface the plan at debug level - one event per request describing
-        // every initial fetch and every batched _entities follow-up.
         log_plan(&plan);
 
-        // ---- execute + entity stitching (Phase 3.4) -----------------------
+        // ---- execute + entity stitching (Phase 3.4 / 4.1) ----------------
+        let plan_for_cache = plan.clone();
         let results = execute(
             plan,
             req.variables.clone(),
             req.operation_name.clone(),
-            state.http.clone(),
+            state.subgraph.clone(),
         )
         .await;
-
-        // ---- merge + log --------------------------------------------------
         let merged = merge(results);
         let total = start.elapsed();
         record_request_completion(
@@ -166,10 +275,47 @@ async fn graphql(
             total,
             &merged.subgraph_durations_ms,
         );
+
+        // ---- cache successful read operations (Phase 4.2) -----------------
+        if response_cacheable(&plan_for_cache, identity.as_deref(), &merged.response) {
+            if let (Some(id), Some(cache)) = (identity.as_deref(), state.cache.as_ref()) {
+                if cache.enabled() {
+                    let key = ResponseCache::cache_key(
+                        &req.query,
+                        req.operation_name.as_deref(),
+                        &req.variables,
+                        id,
+                    );
+                    let ttl = cache.ttl_for_plan(&plan_for_cache);
+                    match serde_json::to_vec(&merged.response) {
+                        Ok(bytes) => {
+                            if let Err(e) =
+                                cache::try_set(Some(cache), &key, ttl, &bytes).await
+                            {
+                                tracing::warn!(key = %key, %e, "redis SET failed");
+                            }
+                        }
+                        Err(e) => tracing::warn!(key = %key, %e, "cache body serialization failed"),
+                    }
+                }
+            }
+        }
+
         (StatusCode::OK, Json(merged.response)).into_response()
     }
     .instrument(span)
     .await
+}
+
+fn response_cacheable(
+    plan: &crate::plan::ExecutionPlan,
+    identity: Option<&str>,
+    resp: &GraphQLResponse,
+) -> bool {
+    plan.operation_kind == OperationKind::Query
+        && identity.map(|s| !s.is_empty()).unwrap_or(false)
+        && resp.errors.is_empty()
+        && resp.data.is_some()
 }
 
 fn log_plan(plan: &crate::plan::ExecutionPlan) {

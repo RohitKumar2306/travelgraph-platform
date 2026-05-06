@@ -37,6 +37,12 @@ services:
       timeout: 5s
       retries: 20
 
+  redis:
+    image: redis:7-alpine
+    container_name: travelgraph-redis
+    ports:
+      - "6379:6379"
+
   property-service:
     build:
       context: ./services/property-service
@@ -157,7 +163,11 @@ services:
     environment:
       RUST_LOG: info
       ROUTER_CONFIG: /app/config/router.toml
+      ROUTER_REDIS_URL: redis://redis:6379
+      ROUTER_CACHE_ENABLED: "true"
     depends_on:
+      redis:
+        condition: service_started
       property-service:
         condition: service_started
       pricing-service:
