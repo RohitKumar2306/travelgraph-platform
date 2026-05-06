@@ -1,0 +1,84 @@
+server:
+  port: 8082
+
+spring:
+  application:
+    name: pricing-service
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:default}
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:travelgraph}?currentSchema=pricing_schema
+    username: ${DB_USER:travelgraph}
+    password: ${DB_PASSWORD:travelgraph}
+    hikari:
+      maximum-pool-size: 10
+      pool-name: pricing-pool
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        default_schema: pricing_schema
+        jdbc.time_zone: UTC
+    open-in-view: false
+  flyway:
+    enabled: true
+    schemas: pricing_schema
+    default-schema: pricing_schema
+    create-schemas: false
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+graphql:
+  packages:
+    - "com.travelgraph.pricing"
+  endpoint: "graphql"
+  graphiql:
+    enabled: false
+    endpoint: "graphiql"
+  introspection:
+    enabled: false
+  federation:
+    enabled: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when_authorized
+  metrics:
+    tags:
+      application: pricing-service
+
+# Pricing rules - kept here so they can be tuned without redeploying code.
+# All percentages are decimals (e.g. 0.20 = 20%).
+travelgraph:
+  pricing:
+    weekend-uplift: 0.20
+    holiday-uplift: 0.35
+    loyalty:
+      bronze: 0.00
+      silver: 0.05
+      gold: 0.10
+      platinum: 0.15
+    # ISO local dates (UTC-naive). Curated US/global holidays for demo purposes.
+    holidays:
+      - 2026-01-01   # New Year's Day
+      - 2026-02-14   # Valentine's Day
+      - 2026-05-25   # Memorial Day (US)
+      - 2026-07-04   # Independence Day (US)
+      - 2026-09-07   # Labor Day (US)
+      - 2026-11-26   # Thanksgiving (US)
+      - 2026-12-24   # Christmas Eve
+      - 2026-12-25   # Christmas Day
+      - 2026-12-31   # New Year's Eve
+
+logging:
+  level:
+    root: INFO
+    com.travelgraph: INFO

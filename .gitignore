@@ -1,0 +1,33 @@
+# JVM / Gradle
+.gradle/
+build/
+out/
+!**/src/main/**/build/
+!**/src/test/**/build/
+
+# IDE
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+.fleet/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs / runtime
+*.log
+*.pid
+hs_err_pid*
+replay_pid*
+
+# Local env / secrets
+.env
+.env.local
+*.local.yml
+
+# Docker / Postgres data
+infra/postgres/data/
+pgdata/

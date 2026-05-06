@@ -1,0 +1,63 @@
+# TravelGraph Platform - local dev compose
+# A single Postgres instance hosts one schema per subgraph. Each subgraph runs
+# its own Flyway migrations against its own schema, modelling the production
+# "service owns its data" boundary while staying cheap to spin up locally.
+name: travelgraph
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: travelgraph-postgres
+    environment:
+      POSTGRES_USER: travelgraph
+      POSTGRES_PASSWORD: travelgraph
+      POSTGRES_DB: travelgraph
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U travelgraph -d travelgraph"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  property-service:
+    build:
+      context: ./services/property-service
+    image: travelgraph/property-service:dev
+    container_name: travelgraph-property
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: travelgraph
+      DB_USER: travelgraph
+      DB_PASSWORD: travelgraph
+    ports:
+      - "8081:8081"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  pricing-service:
+    build:
+      context: ./services/pricing-service
+    image: travelgraph/pricing-service:dev
+    container_name: travelgraph-pricing
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: travelgraph
+      DB_USER: travelgraph
+      DB_PASSWORD: travelgraph
+    ports:
+      - "8082:8082"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  pgdata:

@@ -1,0 +1,64 @@
+server:
+  port: 8081
+
+spring:
+  application:
+    name: property-service
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:default}
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:travelgraph}?currentSchema=property_schema
+    username: ${DB_USER:travelgraph}
+    password: ${DB_PASSWORD:travelgraph}
+    hikari:
+      maximum-pool-size: 10
+      pool-name: property-pool
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        default_schema: property_schema
+        jdbc.time_zone: UTC
+        format_sql: false
+    open-in-view: false
+  flyway:
+    enabled: true
+    schemas: property_schema
+    default-schema: property_schema
+    create-schemas: false
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+# graphql-kotlin spring server config.
+# In non-dev profiles introspection AND graphiql are off; the dev profile flips both on.
+graphql:
+  packages:
+    - "com.travelgraph.property"
+  endpoint: "graphql"
+  graphiql:
+    enabled: false
+    endpoint: "graphiql"
+  introspection:
+    enabled: false
+  federation:
+    enabled: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when_authorized
+  metrics:
+    tags:
+      application: property-service
+
+logging:
+  level:
+    root: INFO
+    com.travelgraph: INFO
