@@ -31,3 +31,9 @@ replay_pid*
 # Docker / Postgres data
 infra/postgres/data/
 pgdata/
+
+# Rust router
+router/target/
+**/target/
+.toolchains/
+Cargo.lock.bak

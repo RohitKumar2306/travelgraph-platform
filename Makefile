@@ -7,8 +7,9 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-COMPOSE := docker compose
-PROFILE := --profile subgraphs
+COMPOSE     := docker compose
+PROFILE     := --profile subgraphs
+ALL_PROFILE := --profile subgraphs --profile router
 
 # ---------------------------------------------------------------------------
 # Top-level lifecycle
@@ -63,3 +64,36 @@ test: ## Run unit tests for every subgraph (uses the gradle docker image, no loc
 	  docker run --rm -v "$$PWD/services/$$svc":/work -w /work \
 	    gradle:8.10.2-jdk21 gradle --no-daemon test || exit 1; \
 	done
+
+# ---------------------------------------------------------------------------
+# Router (Phase 2)
+# ---------------------------------------------------------------------------
+
+.PHONY: router-up
+router-up: ## Build & start the Rust router on top of the subgraph stack.
+	$(COMPOSE) $(ALL_PROFILE) up -d --build
+
+.PHONY: router-down
+router-down: ## Stop everything (subgraphs + router).
+	$(COMPOSE) $(ALL_PROFILE) down
+
+.PHONY: router-logs
+router-logs: ## Tail the router's stdout (JSON-formatted tracing events).
+	$(COMPOSE) logs -f --tail=200 router
+
+.PHONY: router-build
+router-build: ## Build the router image only.
+	$(COMPOSE) $(ALL_PROFILE) build router
+
+.PHONY: router-test
+router-test: ## Run the router's unit tests inside the official rust toolchain.
+	@docker run --rm -v "$$PWD/router":/work -w /work \
+	  rust:1.86 cargo test --manifest-path Cargo.toml
+
+.PHONY: router-image-size
+router-image-size: ## Show the runtime image size; Phase 2.1 budget is <50MB.
+	@docker image inspect travelgraph/router:dev --format 'travelgraph/router:dev = {{.Size}} bytes ({{div .Size 1048576}} MiB)'
+
+.PHONY: test-router
+test-router: ## Curl-based end-to-end smoke test against the router (/health + /graphql).
+	@./scripts/test-router.sh

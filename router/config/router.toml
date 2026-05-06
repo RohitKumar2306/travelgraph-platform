@@ -1,0 +1,41 @@
+# TravelGraph router configuration.
+# In Phase 2 the router uses a hand-coded field -> subgraph map. Phase 3
+# replaces this with a composed supergraph and an automatic query planner.
+
+[server]
+port = 8080
+default_subgraph_timeout_ms = 1000
+
+# ---------------------------------------------------------------------------
+# Subgraph endpoints. URLs use the docker-compose service names so that the
+# router talks to subgraphs over the internal compose network.
+#
+# `fields` / `mutations` list the top-level operation fields each subgraph
+# owns. The router uses these to dispatch each top-level field to its owner
+# in parallel.
+# ---------------------------------------------------------------------------
+
+[subgraphs.property]
+url        = "http://property-service:8081/graphql"
+fields     = ["property", "searchProperties"]
+mutations  = []
+
+[subgraphs.pricing]
+url        = "http://pricing-service:8082/graphql"
+fields     = ["price"]
+mutations  = []
+
+[subgraphs.booking]
+url        = "http://booking-service:8083/graphql"
+fields     = ["bookings", "availableRooms"]
+mutations  = ["createBooking", "cancelBooking"]
+
+[subgraphs.user]
+url        = "http://user-service:8084/graphql"
+fields     = ["user", "me"]
+mutations  = []
+
+[subgraphs.review]
+url        = "http://review-service:8085/graphql"
+fields     = ["reviews", "reviewSummary"]
+mutations  = ["addReview"]

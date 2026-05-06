@@ -102,5 +102,38 @@ services:
       postgres:
         condition: service_healthy
 
+  # ---------------------------------------------------------------------------
+  # Phase 2: Rust router. Profile `router` brings up the router; including
+  # both `subgraphs` and `router` profiles starts the whole stack:
+  #     docker compose --profile subgraphs --profile router up -d
+  #
+  # The router depends on every subgraph being container-up (not strictly
+  # healthy - subgraphs themselves take a moment to finish Flyway migrations
+  # and the router will surface upstream errors as GraphQL errors during the
+  # warmup window, which is the desired behaviour for Phase 2.4 testing).
+  # ---------------------------------------------------------------------------
+  router:
+    build:
+      context: ./router
+    image: travelgraph/router:dev
+    container_name: travelgraph-router
+    profiles: ["router"]
+    ports:
+      - "8080:8080"
+    environment:
+      RUST_LOG: info
+      ROUTER_CONFIG: /app/config/router.toml
+    depends_on:
+      property-service:
+        condition: service_started
+      pricing-service:
+        condition: service_started
+      booking-service:
+        condition: service_started
+      user-service:
+        condition: service_started
+      review-service:
+        condition: service_started
+
 volumes:
   pgdata:
