@@ -42,7 +42,12 @@ graphql:
   introspection:
     enabled: false
   federation:
-    enabled: false
+    # Federation v2: this subgraph publishes a federated SDL via the
+    # `_service { sdl }` query and exposes `_entities` for type-resolution.
+    enabled: true
+    optInFederationV2: true
+    tracing:
+      enabled: false
 
 management:
   endpoints:

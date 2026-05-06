@@ -2,6 +2,8 @@ package com.travelgraph.property.graphql
 
 import com.expediagroup.graphql.generator.annotations.GraphQLDescription
 import com.expediagroup.graphql.generator.annotations.GraphQLName
+import com.expediagroup.graphql.generator.federation.directives.FieldSet
+import com.expediagroup.graphql.generator.federation.directives.KeyDirective
 import com.expediagroup.graphql.generator.scalars.ID
 import com.travelgraph.property.domain.Property
 
@@ -13,7 +15,13 @@ import com.travelgraph.property.domain.Property
  *  - The over-the-wire shape can evolve independently of the table layout.
  *  - `id` is exposed as the GraphQL `ID!` scalar via graphql-kotlin's
  *    [com.expediagroup.graphql.generator.scalars.ID] wrapper.
+ *
+ * Federation: this subgraph **owns** the `Property` entity, so we annotate
+ * it with `@key(fields: "id")`. Other subgraphs (pricing, review) extend
+ * `Property` with their own fields by re-declaring the type with the same
+ * `@key` and an `@extends` marker.
  */
+@KeyDirective(fields = FieldSet("id"))
 @GraphQLName("Property")
 @GraphQLDescription("A bookable property in the TravelGraph catalog.")
 data class PropertyView(

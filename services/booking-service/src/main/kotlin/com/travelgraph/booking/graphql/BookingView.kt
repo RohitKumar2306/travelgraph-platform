@@ -2,10 +2,13 @@ package com.travelgraph.booking.graphql
 
 import com.expediagroup.graphql.generator.annotations.GraphQLDescription
 import com.expediagroup.graphql.generator.annotations.GraphQLName
+import com.expediagroup.graphql.generator.federation.directives.FieldSet
+import com.expediagroup.graphql.generator.federation.directives.KeyDirective
 import com.expediagroup.graphql.generator.scalars.ID
 import com.travelgraph.booking.domain.Booking
 import com.travelgraph.booking.domain.BookingStatus
 
+@KeyDirective(fields = FieldSet("id"))
 @GraphQLName("Booking")
 @GraphQLDescription("A confirmed, pending, or cancelled booking for a property.")
 data class BookingView(

@@ -1,16 +1,14 @@
 //! TravelGraph router binary entrypoint.
 //!
-//! The router is intentionally split into small modules:
-//!   * [`config`]   - runtime configuration loaded from TOML
-//!   * [`graphql`]  - parser, validator, response shapes (Phase 2.2)
-//!   * [`registry`] - field-name -> subgraph mapping (Phase 2.3)
-//!   * [`execute`]  - parallel reqwest dispatch (Phase 2.3)
-//!   * [`merge`]    - response merger + error handling (Phase 2.4)
-//!   * [`logging`]  - request-scoped span helpers
-//!   * [`server`]   - axum router wiring everything together
-//!
-//! Phase 3 will replace the hand-coded routing in `registry`/`execute` with a
-//! supergraph-driven query planner.
+//! Modules:
+//!   * [`config`]      - runtime configuration loaded from TOML.
+//!   * [`graphql`]     - parser, validator, response shapes (Phase 2.2).
+//!   * [`supergraph`]  - parsed Apollo Federation v2 supergraph (Phase 3.3).
+//!   * [`plan`]        - supergraph-aware query planner (Phase 3.3 / 3.4).
+//!   * [`execute`]     - initial fetch + batched `_entities` executor.
+//!   * [`merge`]       - response stitcher (Phase 3.4).
+//!   * [`logging`]     - request-scoped span helpers.
+//!   * [`server`]      - axum router wiring everything together.
 
 mod config;
 mod error;
@@ -18,8 +16,9 @@ mod execute;
 mod graphql;
 mod logging;
 mod merge;
-mod registry;
+mod plan;
 mod server;
+mod supergraph;
 
 use anyhow::Context;
 use std::net::SocketAddr;
@@ -34,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
     let config = config::Config::load().context("loading router config")?;
     tracing::info!(
         port = config.server.port,
-        subgraphs = config.subgraphs.len(),
+        supergraph = %config.supergraph.path.display(),
         "router starting"
     );
 

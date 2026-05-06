@@ -39,7 +39,10 @@ graphql:
   introspection:
     enabled: false
   federation:
-    enabled: false
+    enabled: true
+    optInFederationV2: true
+    tracing:
+      enabled: false
 
 management:
   endpoints:

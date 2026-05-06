@@ -1,10 +1,15 @@
 //! GraphQL request/response shapes plus parser and validator.
 //!
-//! The router is intentionally schemaless in Phase 2: we don't have a
-//! supergraph yet (that lands in Phase 3). We use [`apollo_compiler::ast`] to
-//! parse and run "standalone" validation that can be done without a schema.
+//! Schema-aware planning lives in [`crate::plan`] (Phase 3); the modules here
+//! deal only with the inbound document text:
+//!
+//!   * [`types`]    - `{query, variables, operationName}` request and the
+//!                    spec-shaped `{data, errors}` response envelope.
+//!   * [`parse`]    - `apollo-compiler` AST parsing with location-aware
+//!                    error reporting.
+//!   * [`validate`] - schema-independent validation (no anonymous mixed
+//!                    operations, declared variables only, etc.).
 
 pub mod parse;
-pub mod project;
 pub mod types;
 pub mod validate;

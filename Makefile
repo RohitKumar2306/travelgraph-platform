@@ -7,9 +7,10 @@
 .DEFAULT_GOAL := help
 SHELL := /bin/bash
 
-COMPOSE     := docker compose
-PROFILE     := --profile subgraphs
-ALL_PROFILE := --profile subgraphs --profile router
+COMPOSE       := docker compose
+PROFILE       := --profile subgraphs
+ALL_PROFILE   := --profile subgraphs --profile router
+COMPOSER_PROF := --profile subgraphs --profile composer
 
 # ---------------------------------------------------------------------------
 # Top-level lifecycle
@@ -97,3 +98,26 @@ router-image-size: ## Show the runtime image size; Phase 2.1 budget is <50MB.
 .PHONY: test-router
 test-router: ## Curl-based end-to-end smoke test against the router (/health + /graphql).
 	@./scripts/test-router.sh
+
+# ---------------------------------------------------------------------------
+# Schema composer (Phase 3.2)
+# ---------------------------------------------------------------------------
+
+.PHONY: compose
+compose: ## Compose all subgraph SDLs into schema-registry/supergraph/supergraph.graphql.
+	$(COMPOSE) $(COMPOSER_PROF) build composer
+	$(COMPOSE) $(COMPOSER_PROF) run --rm composer
+
+.PHONY: compose-test
+compose-test: ## Compose against running subgraphs and exit non-zero on conflict.
+	@./scripts/test-composer.sh
+
+.PHONY: federation-up
+federation-up: ## Build subgraphs, compose supergraph, then start the router.
+	$(COMPOSE) $(PROFILE) up -d --build
+	@$(MAKE) compose
+	$(COMPOSE) $(ALL_PROFILE) up -d --build router
+
+.PHONY: test-federation
+test-federation: ## End-to-end Phase 3 acceptance test (subgraphs _service + router stitching).
+	@./scripts/test-federation.sh

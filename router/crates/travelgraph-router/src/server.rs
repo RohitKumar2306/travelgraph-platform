@@ -4,13 +4,14 @@
 //!
 //!   * `GET  /health`  -> 200 OK, used by docker / k8s healthchecks.
 //!   * `POST /graphql` -> the full pipeline:
-//!         parse -> validate -> project -> dispatch -> merge.
+//!         parse -> validate -> plan (supergraph-aware) -> execute -> merge.
 //!
 //! Status code rules:
 //!
 //!   * Parse failure        -> HTTP 400 (per Phase 2.2 prompt).
 //!   * Validation failure   -> HTTP 200 + errors (GraphQL-over-HTTP spec).
-//!   * Routing/exec failure -> HTTP 200 + per-field error (Phase 2.4 policy).
+//!   * Routing/exec failure -> HTTP 200 + per-field error (Phase 2.4 policy
+//!                              preserved across Phase 3).
 
 use axum::{
     extract::State,
@@ -25,24 +26,30 @@ use tower_http::trace::TraceLayer;
 use tracing::Instrument;
 
 use crate::config::Config;
-use crate::graphql::project::plan;
-use crate::graphql::types::{GraphQLError, GraphQLRequest, GraphQLResponse};
+use crate::execute::execute;
+use crate::graphql::types::{GraphQLRequest, GraphQLResponse};
 use crate::graphql::{parse, validate};
 use crate::logging::{open_request_span, record_request_completion};
 use crate::merge::merge;
-use crate::registry::SubgraphRegistry;
+use crate::plan::plan_operation;
+use crate::supergraph::SupergraphCatalog;
 
 #[derive(Clone)]
 pub struct AppState {
-    /// Kept for future use (Phase 5 will read auth settings out of it).
+    /// Held mainly so the auth phase can read settings off it later.
     #[allow(dead_code)]
     pub config: Arc<Config>,
-    pub registry: Arc<SubgraphRegistry>,
+    pub catalog: Arc<SupergraphCatalog>,
     pub http: reqwest::Client,
 }
 
 pub async fn build(config: Config) -> anyhow::Result<Router> {
-    let registry = SubgraphRegistry::from_config(&config)?;
+    // Phase 3: load the composed supergraph and build a [`SupergraphCatalog`]
+    // describing entity ownership and field-level subgraph routing. Replaces
+    // Phase 2.3's hand-coded `SubgraphRegistry`.
+    let mut catalog = crate::supergraph::load_from_file(&config.supergraph.path)?;
+    apply_timeout_overrides(&mut catalog, &config);
+
     let http = reqwest::Client::builder()
         // Each subgraph call additionally times out via tokio::time::timeout
         // in the executor. The connect timeout below stops a misconfigured URL
@@ -54,7 +61,7 @@ pub async fn build(config: Config) -> anyhow::Result<Router> {
 
     let state = AppState {
         config: Arc::new(config),
-        registry: Arc::new(registry),
+        catalog: Arc::new(catalog),
         http,
     };
 
@@ -65,6 +72,16 @@ pub async fn build(config: Config) -> anyhow::Result<Router> {
         .with_state(state);
 
     Ok(app)
+}
+
+fn apply_timeout_overrides(catalog: &mut SupergraphCatalog, config: &Config) {
+    let default = Duration::from_millis(config.server.default_subgraph_timeout_ms);
+    for (name, route) in catalog.subgraphs.iter_mut() {
+        let override_ms = config.timeouts.get(name).copied();
+        route.timeout = override_ms
+            .map(Duration::from_millis)
+            .unwrap_or(default);
+    }
 }
 
 // ---------- handlers --------------------------------------------------------
@@ -107,45 +124,40 @@ async fn graphql(
                 extensions: None,
             };
             tracing::warn!("validation error");
-            // GraphQL-over-HTTP spec: validation errors return 200.
             return (StatusCode::OK, Json(body)).into_response();
         }
 
-        // ---- plan (Phase 2.3) ----------------------------------------------
-        let plans = match plan(&parsed.document, req.operation_name.as_deref(), &state.registry) {
+        // ---- plan against the supergraph (Phase 3.3) -----------------------
+        let plan = match plan_operation(
+            &parsed.document,
+            req.operation_name.as_deref(),
+            &state.catalog,
+        ) {
             Ok(p) => p,
-            Err(errors) => {
+            Err(e) => {
                 let body = GraphQLResponse {
                     data: None,
-                    errors,
+                    errors: vec![e.into_graphql()],
                     extensions: None,
                 };
                 return (StatusCode::OK, Json(body)).into_response();
             }
         };
 
-        if plans.is_empty() {
-            let body = GraphQLResponse {
-                data: Some(serde_json::Value::Object(Default::default())),
-                errors: vec![GraphQLError::message(
-                    "Operation has no top-level fields to execute.",
-                )],
-                extensions: None,
-            };
-            return (StatusCode::OK, Json(body)).into_response();
-        }
+        // Surface the plan at debug level - one event per request describing
+        // every initial fetch and every batched _entities follow-up.
+        log_plan(&plan);
 
-        // ---- dispatch in parallel (Phase 2.3) -----------------------------
-        let results = crate::execute::dispatch_all(
-            plans,
+        // ---- execute + entity stitching (Phase 3.4) -----------------------
+        let results = execute(
+            plan,
             req.variables.clone(),
             req.operation_name.clone(),
-            &state.registry,
-            &state.http,
+            state.http.clone(),
         )
         .await;
 
-        // ---- merge + log (Phase 2.4) --------------------------------------
+        // ---- merge + log --------------------------------------------------
         let merged = merge(results);
         let total = start.elapsed();
         record_request_completion(
@@ -158,4 +170,33 @@ async fn graphql(
     }
     .instrument(span)
     .await
+}
+
+fn log_plan(plan: &crate::plan::ExecutionPlan) {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
+    let initial: Vec<String> = plan
+        .field_fetches
+        .iter()
+        .map(|f| format!("{}->{}", f.response_key, f.initial.subgraph))
+        .collect();
+    let entity: Vec<String> = plan
+        .field_fetches
+        .iter()
+        .flat_map(|f| {
+            f.entity_fetches.iter().map(move |e| {
+                format!(
+                    "{}.{}->{}",
+                    f.response_key, e.type_name, e.subgraph
+                )
+            })
+        })
+        .collect();
+    tracing::debug!(
+        operation = %plan.operation_name.as_deref().unwrap_or(""),
+        ?initial,
+        entity_fetches = ?entity,
+        "execution plan"
+    );
 }

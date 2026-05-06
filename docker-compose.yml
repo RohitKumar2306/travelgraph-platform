@@ -103,6 +103,35 @@ services:
         condition: service_healthy
 
   # ---------------------------------------------------------------------------
+  # Phase 3: schema composer. Profile `composer` runs the supergraph composer
+  # on demand:
+  #     docker compose --profile subgraphs --profile composer run --rm composer
+  #
+  # Output is written to ./schema-registry/supergraph/supergraph.graphql which
+  # is bind-mounted into the router (Phase 3.3) so a fresh compose immediately
+  # rolls out to the next request.
+  # ---------------------------------------------------------------------------
+  composer:
+    build:
+      context: ./schema-registry/composer
+    image: travelgraph/composer:dev
+    container_name: travelgraph-composer
+    profiles: ["composer"]
+    volumes:
+      - ./schema-registry/supergraph:/supergraph
+    depends_on:
+      property-service:
+        condition: service_started
+      pricing-service:
+        condition: service_started
+      booking-service:
+        condition: service_started
+      user-service:
+        condition: service_started
+      review-service:
+        condition: service_started
+
+  # ---------------------------------------------------------------------------
   # Phase 2: Rust router. Profile `router` brings up the router; including
   # both `subgraphs` and `router` profiles starts the whole stack:
   #     docker compose --profile subgraphs --profile router up -d
@@ -120,6 +149,11 @@ services:
     profiles: ["router"]
     ports:
       - "8080:8080"
+    volumes:
+      # Phase 3.3: the router reads the composed supergraph at startup. We
+      # bind-mount the schema-registry output directory so a fresh
+      # `make compose` rolls out to the next router restart without a rebuild.
+      - ./schema-registry/supergraph:/app/supergraph
     environment:
       RUST_LOG: info
       ROUTER_CONFIG: /app/config/router.toml

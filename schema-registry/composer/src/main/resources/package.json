@@ -1,0 +1,15 @@
+{
+  "name": "travelgraph-composer-helper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Node helper invoked by travelgraph-composer (Kotlin CLI) to run @apollo/composition.",
+  "type": "module",
+  "main": "compose.mjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@apollo/composition": "^2.10.0",
+    "graphql": "^16.9.0"
+  }
+}

@@ -2,10 +2,13 @@ package com.travelgraph.user.graphql
 
 import com.expediagroup.graphql.generator.annotations.GraphQLDescription
 import com.expediagroup.graphql.generator.annotations.GraphQLName
+import com.expediagroup.graphql.generator.federation.directives.FieldSet
+import com.expediagroup.graphql.generator.federation.directives.KeyDirective
 import com.expediagroup.graphql.generator.scalars.ID
 import com.travelgraph.user.domain.LoyaltyStatus
 import com.travelgraph.user.domain.User
 
+@KeyDirective(fields = FieldSet("id"))
 @GraphQLName("User")
 @GraphQLDescription("A guest of the platform, with loyalty status and currency preference.")
 data class UserView(

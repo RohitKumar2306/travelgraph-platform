@@ -1,5 +1,11 @@
 //! Router configuration loaded at startup from a TOML file.
 //!
+//! Phase 3 changes the schema: instead of a hand-coded `[subgraphs.NAME]`
+//! map, the router reads the composed supergraph at `[supergraph].path`
+//! and learns subgraph URLs from `enum join__Graph`. The TOML now only
+//! holds operational settings (port, default timeout, optional per-subgraph
+//! overrides).
+//!
 //! Source resolution order:
 //!   1. `ROUTER_CONFIG` environment variable (path to a .toml file)
 //!   2. `./config/router.toml` (relative to the working directory)
@@ -8,50 +14,41 @@
 //! ```toml
 //! [server]
 //! port = 8080
+//! default_subgraph_timeout_ms = 1000
 //!
-//! [subgraphs.property]
-//! url        = "http://property-service:8081/graphql"
-//! fields     = ["property", "searchProperties"]
-//! mutations  = []
-//! timeout_ms = 1000
+//! [supergraph]
+//! path = "/app/supergraph/supergraph.graphql"
+//!
+//! [timeouts]
+//! pricing = 1500
 //! ```
 
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::time::Duration;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
     pub server: Server,
-
-    /// Map of subgraph name -> definition. The key is purely a label used in
-    /// metrics / logging; routing decisions use the [`SubgraphConfig::fields`]
-    /// and [`SubgraphConfig::mutations`] lists.
-    pub subgraphs: HashMap<String, SubgraphConfig>,
+    pub supergraph: SupergraphPath,
+    /// Optional per-subgraph timeout overrides (key = subgraph name as
+    /// declared in the supergraph's `enum join__Graph`).
+    #[serde(default)]
+    pub timeouts: HashMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Server {
     pub port: u16,
-    /// Default per-subgraph HTTP timeout when a subgraph entry omits it.
+    /// Default per-subgraph HTTP timeout when no override is configured.
     /// 1000ms matches Phase 2.4 acceptance.
     #[serde(default = "default_timeout_ms")]
     pub default_subgraph_timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct SubgraphConfig {
-    pub url: String,
-    /// Top-level Query field names this subgraph owns.
-    #[serde(default)]
-    pub fields: Vec<String>,
-    /// Top-level Mutation field names this subgraph owns.
-    #[serde(default)]
-    pub mutations: Vec<String>,
-    /// Per-subgraph timeout override.
-    #[serde(default)]
-    pub timeout_ms: Option<u64>,
+pub struct SupergraphPath {
+    pub path: PathBuf,
 }
 
 fn default_timeout_ms() -> u64 {
@@ -68,15 +65,5 @@ impl Config {
         let cfg: Config = toml::from_str(&text)
             .map_err(|e| anyhow::anyhow!("parsing config from {}: {e}", path.display()))?;
         Ok(cfg)
-    }
-
-    /// Returns the effective per-subgraph timeout, falling back to the
-    /// server-level default when the subgraph itself has no override.
-    pub fn timeout_for(&self, subgraph: &SubgraphConfig) -> Duration {
-        Duration::from_millis(
-            subgraph
-                .timeout_ms
-                .unwrap_or(self.server.default_subgraph_timeout_ms),
-        )
     }
 }

@@ -1,0 +1,24 @@
+# Default subgraph manifest used by `travelgraph-composer` when no
+# `--subgraph` arguments are supplied. Hostnames default to the docker-compose
+# service names so the composer can run inside the same network as the
+# subgraphs; override with `--subgraph name=url` from the host.
+
+[[subgraphs]]
+name = "property"
+url  = "http://property-service:8081/graphql"
+
+[[subgraphs]]
+name = "pricing"
+url  = "http://pricing-service:8082/graphql"
+
+[[subgraphs]]
+name = "booking"
+url  = "http://booking-service:8083/graphql"
+
+[[subgraphs]]
+name = "user"
+url  = "http://user-service:8084/graphql"
+
+[[subgraphs]]
+name = "review"
+url  = "http://review-service:8085/graphql"
