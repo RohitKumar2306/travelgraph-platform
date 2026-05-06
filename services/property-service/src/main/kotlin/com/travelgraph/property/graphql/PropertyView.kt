@@ -1,6 +1,7 @@
 package com.travelgraph.property.graphql
 
 import com.expediagroup.graphql.generator.annotations.GraphQLDescription
+import com.expediagroup.graphql.generator.annotations.GraphQLName
 import com.expediagroup.graphql.generator.scalars.ID
 import com.travelgraph.property.domain.Property
 
@@ -13,6 +14,7 @@ import com.travelgraph.property.domain.Property
  *  - `id` is exposed as the GraphQL `ID!` scalar via graphql-kotlin's
  *    [com.expediagroup.graphql.generator.scalars.ID] wrapper.
  */
+@GraphQLName("Property")
 @GraphQLDescription("A bookable property in the TravelGraph catalog.")
 data class PropertyView(
     @GraphQLDescription("Globally unique property identifier.")

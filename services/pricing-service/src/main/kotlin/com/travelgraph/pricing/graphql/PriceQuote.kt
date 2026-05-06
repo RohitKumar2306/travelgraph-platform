@@ -1,6 +1,7 @@
 package com.travelgraph.pricing.graphql
 
 import com.expediagroup.graphql.generator.annotations.GraphQLDescription
+import com.expediagroup.graphql.generator.annotations.GraphQLName
 import com.expediagroup.graphql.generator.scalars.ID
 import com.travelgraph.pricing.service.PriceCalculator
 
@@ -15,6 +16,7 @@ import com.travelgraph.pricing.service.PriceCalculator
  * `amount` is the pre-tax, post-discount nightly subtotal across all nights.
  * `totalAmount` is what the guest is charged (`amount + taxes`).
  */
+@GraphQLName("Price")
 @GraphQLDescription("Quoted price for a property over a specific stay window.")
 data class PriceQuote(
     @GraphQLDescription("Property the quote is for.")

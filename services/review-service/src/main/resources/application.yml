@@ -1,0 +1,61 @@
+server:
+  port: 8085
+
+spring:
+  application:
+    name: review-service
+  profiles:
+    active: ${SPRING_PROFILES_ACTIVE:default}
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:travelgraph}?currentSchema=review_schema
+    username: ${DB_USER:travelgraph}
+    password: ${DB_PASSWORD:travelgraph}
+    hikari:
+      maximum-pool-size: 10
+      pool-name: review-pool
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        default_schema: review_schema
+        jdbc.time_zone: UTC
+    open-in-view: false
+  flyway:
+    enabled: true
+    schemas: review_schema
+    default-schema: review_schema
+    create-schemas: false
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+graphql:
+  packages:
+    - "com.travelgraph.review"
+  endpoint: "graphql"
+  graphiql:
+    enabled: false
+    endpoint: "graphiql"
+  introspection:
+    enabled: false
+  federation:
+    enabled: false
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when_authorized
+  metrics:
+    tags:
+      application: review-service
+
+logging:
+  level:
+    root: INFO
+    com.travelgraph: INFO

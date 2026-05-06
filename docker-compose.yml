@@ -1,8 +1,22 @@
 # TravelGraph Platform - local dev compose
+#
 # A single Postgres instance hosts one schema per subgraph. Each subgraph runs
 # its own Flyway migrations against its own schema, modelling the production
 # "service owns its data" boundary while staying cheap to spin up locally.
+#
+# Subgraphs are gated behind the `subgraphs` profile. Bring everything online
+# with:    docker compose --profile subgraphs up -d   (or `make up`).
+# `docker compose up postgres` still works for working on a single subgraph
+# locally outside of Docker.
 name: travelgraph
+
+x-subgraph-env: &subgraph-env
+  SPRING_PROFILES_ACTIVE: dev
+  DB_HOST: postgres
+  DB_PORT: "5432"
+  DB_NAME: travelgraph
+  DB_USER: travelgraph
+  DB_PASSWORD: travelgraph
 
 services:
   postgres:
@@ -28,13 +42,8 @@ services:
       context: ./services/property-service
     image: travelgraph/property-service:dev
     container_name: travelgraph-property
-    environment:
-      SPRING_PROFILES_ACTIVE: dev
-      DB_HOST: postgres
-      DB_PORT: "5432"
-      DB_NAME: travelgraph
-      DB_USER: travelgraph
-      DB_PASSWORD: travelgraph
+    profiles: ["subgraphs"]
+    environment: *subgraph-env
     ports:
       - "8081:8081"
     depends_on:
@@ -46,15 +55,49 @@ services:
       context: ./services/pricing-service
     image: travelgraph/pricing-service:dev
     container_name: travelgraph-pricing
-    environment:
-      SPRING_PROFILES_ACTIVE: dev
-      DB_HOST: postgres
-      DB_PORT: "5432"
-      DB_NAME: travelgraph
-      DB_USER: travelgraph
-      DB_PASSWORD: travelgraph
+    profiles: ["subgraphs"]
+    environment: *subgraph-env
     ports:
       - "8082:8082"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  booking-service:
+    build:
+      context: ./services/booking-service
+    image: travelgraph/booking-service:dev
+    container_name: travelgraph-booking
+    profiles: ["subgraphs"]
+    environment: *subgraph-env
+    ports:
+      - "8083:8083"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  user-service:
+    build:
+      context: ./services/user-service
+    image: travelgraph/user-service:dev
+    container_name: travelgraph-user
+    profiles: ["subgraphs"]
+    environment: *subgraph-env
+    ports:
+      - "8084:8084"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  review-service:
+    build:
+      context: ./services/review-service
+    image: travelgraph/review-service:dev
+    container_name: travelgraph-review
+    profiles: ["subgraphs"]
+    environment: *subgraph-env
+    ports:
+      - "8085:8085"
     depends_on:
       postgres:
         condition: service_healthy
