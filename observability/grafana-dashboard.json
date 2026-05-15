@@ -1,0 +1,98 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "panels": [
+    {
+      "title": "Requests / sec",
+      "type": "timeseries",
+      "targets": [
+        {
+          "expr": "sum(rate(graphql_requests_total[1m]))",
+          "legendFormat": "router"
+        },
+        {
+          "expr": "sum(rate({__name__=~\"(property|pricing|booking|user|review)_requests_total\"}[1m])) by (__name__)",
+          "legendFormat": "{{__name__}}"
+        }
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0}
+    },
+    {
+      "title": "Router latency p50 / p95 / p99",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(graphql_request_duration_ms_bucket[5m])) by (le))", "legendFormat": "p50"},
+        {"expr": "histogram_quantile(0.95, sum(rate(graphql_request_duration_ms_bucket[5m])) by (le))", "legendFormat": "p95"},
+        {"expr": "histogram_quantile(0.99, sum(rate(graphql_request_duration_ms_bucket[5m])) by (le))", "legendFormat": "p99"}
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0}
+    },
+    {
+      "title": "Error rate",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "sum(rate(graphql_requests_total{status!=\"ok\",status!=\"cache_hit\"}[1m])) / clamp_min(sum(rate(graphql_requests_total[1m])), 1)", "legendFormat": "router errors"},
+        {"expr": "sum(rate(graphql_subgraph_errors_total[1m])) by (subgraph)", "legendFormat": "{{subgraph}}"}
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8}
+    },
+    {
+      "title": "Top slowest operations",
+      "type": "table",
+      "targets": [
+        {"expr": "topk(10, histogram_quantile(0.95, sum(rate(graphql_request_duration_ms_bucket[5m])) by (le, operation)))", "format": "table"}
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8}
+    },
+    {
+      "title": "Per-subgraph latency p95",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum(rate(graphql_subgraph_duration_ms_bucket[5m])) by (le, subgraph))", "legendFormat": "{{subgraph}}"}
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16}
+    },
+    {
+      "title": "Cache hit ratio",
+      "type": "stat",
+      "targets": [
+        {"expr": "sum(rate(graphql_cache_hits_total[5m])) / clamp_min(sum(rate(graphql_cache_hits_total[5m])) + sum(rate(graphql_cache_misses_total[5m])), 1)"}
+      ],
+      "gridPos": {"h": 8, "w": 6, "x": 12, "y": 16}
+    },
+    {
+      "title": "Circuit breaker opens",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "sum(rate(graphql_circuit_breaker_open[5m])) by (subgraph)", "legendFormat": "{{subgraph}}"}
+      ],
+      "gridPos": {"h": 8, "w": 6, "x": 18, "y": 16}
+    },
+    {
+      "title": "Rate limit rejections",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "sum(rate(graphql_rate_limited_total[1m])) by (client)", "legendFormat": "{{client}}"}
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24}
+    },
+    {
+      "title": "Subgraph DB duration p95",
+      "type": "timeseries",
+      "targets": [
+        {"expr": "histogram_quantile(0.95, sum(rate({__name__=~\"(property|pricing|booking|user|review)_db_query_duration_ms_bucket\"}[5m])) by (le, __name__))", "legendFormat": "{{__name__}}"}
+      ],
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24}
+    }
+  ],
+  "schemaVersion": 39,
+  "tags": ["travelgraph", "graphql", "observability"],
+  "templating": {"list": []},
+  "time": {"from": "now-30m", "to": "now"},
+  "timezone": "browser",
+  "title": "TravelGraph GraphQL Platform",
+  "uid": "travelgraph-platform",
+  "version": 1
+}

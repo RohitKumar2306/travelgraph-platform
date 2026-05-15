@@ -57,6 +57,14 @@ management:
   metrics:
     tags:
       application: pricing-service
+  tracing:
+    sampling:
+      probability: 1.0
+    propagation:
+      type: w3c
+  otlp:
+    tracing:
+      endpoint: http://${OTEL_COLLECTOR_HOST:localhost}:4318/v1/traces
 
 # Pricing rules - kept here so they can be tuned without redeploying code.
 # All percentages are decimals (e.g. 0.20 = 20%).

@@ -1,0 +1,11 @@
+apiVersion: 1
+
+providers:
+  - name: TravelGraph
+    orgId: 1
+    folder: TravelGraph
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    options:
+      path: /var/lib/grafana/dashboards

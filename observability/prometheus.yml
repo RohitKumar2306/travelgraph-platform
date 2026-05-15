@@ -1,0 +1,22 @@
+global:
+  scrape_interval: 15s
+
+scrape_configs:
+  - job_name: router
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["router:8080"]
+
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8888", "otel-collector:8889"]
+
+  - job_name: subgraphs
+    metrics_path: /actuator/prometheus
+    static_configs:
+      - targets:
+          - property-service:8081
+          - pricing-service:8082
+          - booking-service:8083
+          - user-service:8084
+          - review-service:8085

@@ -4,6 +4,7 @@ use crate::graphql::types::GraphQLResponse;
 use crate::plan::OperationKind;
 use crate::reliability::circuit::CircuitBreaker;
 use futures::future::BoxFuture;
+use opentelemetry::propagation::Injector;
 use reqwest::Url;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,6 +12,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 use tower::Service;
 use tower::ServiceExt;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// One HTTP POST to a subgraph (`/graphql`).
 #[derive(Debug, Clone)]
@@ -19,6 +21,10 @@ pub struct SubgraphHttpCall {
     pub url: String,
     pub body: Vec<u8>,
     pub headers: Vec<(&'static str, String)>,
+    pub client_name: String,
+    pub client_version: String,
+    pub operation_name: String,
+    pub user_id: String,
     pub timeout: Duration,
     pub operation: OperationKind,
 }
@@ -90,9 +96,14 @@ impl SubgraphClient {
         let max_attempts = 1 + self.policy.max_retries;
 
         for attempt in 0..max_attempts {
-            breaker.check()?;
+            if let Err(e) = breaker.check() {
+                crate::metrics::record_circuit_breaker_open(&call.subgraph);
+                return Err(e);
+            }
 
+            let start = std::time::Instant::now();
             let outcome = Self::single_attempt(&self.http, &call).await;
+            crate::metrics::record_subgraph_duration(&call.subgraph, start.elapsed());
 
             match outcome {
                 Ok(resp) => {
@@ -101,6 +112,7 @@ impl SubgraphClient {
                     return Ok(resp);
                 }
                 Err(e) => {
+                    crate::metrics::record_subgraph_error(&call.subgraph);
                     breaker.record(false);
                     let can_retry = matches!(call.operation, OperationKind::Query)
                         && attempt + 1 < max_attempts
@@ -147,7 +159,22 @@ impl SubgraphClient {
             .headers
             .iter()
             .fold(request, |req, (name, value)| req.header(*name, value));
-        let request = request.body(call.body.clone());
+        let mut trace_headers = HashMap::new();
+        opentelemetry::global::get_text_map_propagator(|propagator| {
+            propagator.inject_context(
+                &tracing::Span::current().context(),
+                &mut HeaderInjector(&mut trace_headers),
+            );
+        });
+        let request = trace_headers.iter().fold(request, |req, (name, value)| {
+            req.header(name.as_str(), value)
+        });
+        let request = request
+            .header("apollographql-client-name", &call.client_name)
+            .header("apollographql-client-version", &call.client_version)
+            .header("x-operation-name", &call.operation_name)
+            .header("x-user-id", &call.user_id)
+            .body(call.body.clone());
 
         let result = tokio::time::timeout(call.timeout, request.send()).await;
 
@@ -172,6 +199,14 @@ impl SubgraphClient {
 
         serde_json::from_slice::<GraphQLResponse>(&bytes)
             .map_err(|e| SubgraphError::Decode(e.to_string()))
+    }
+}
+
+struct HeaderInjector<'a>(&'a mut HashMap<String, String>);
+
+impl Injector for HeaderInjector<'_> {
+    fn set(&mut self, key: &str, value: String) {
+        self.0.insert(key.to_string(), value);
     }
 }
 

@@ -57,6 +57,14 @@ management:
   metrics:
     tags:
       application: booking-service
+  tracing:
+    sampling:
+      probability: 1.0
+    propagation:
+      type: w3c
+  otlp:
+    tracing:
+      endpoint: http://${OTEL_COLLECTOR_HOST:localhost}:4318/v1/traces
 
 # Per-property room inventory used by availableRooms. Demo-grade: every property
 # has the same shape until phase 3 introduces a real inventory subgraph.

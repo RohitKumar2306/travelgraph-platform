@@ -26,6 +26,8 @@ pub struct Config {
     pub auth: AuthConfig,
     #[serde(default)]
     pub persisted_queries: PersistedQueriesConfig,
+    #[serde(default)]
+    pub usage: UsageConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -194,6 +196,23 @@ pub struct PersistedQueriesConfig {
     pub allow_arbitrary_queries: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct UsageConfig {
+    #[serde(default = "default_usage_endpoint")]
+    pub endpoint: String,
+    #[serde(default = "default_usage_enabled")]
+    pub enabled: bool,
+}
+
+impl Default for UsageConfig {
+    fn default() -> Self {
+        Self {
+            endpoint: default_usage_endpoint(),
+            enabled: default_usage_enabled(),
+        }
+    }
+}
+
 impl Default for PersistedQueriesConfig {
     fn default() -> Self {
         Self {
@@ -291,6 +310,14 @@ fn default_persisted_queries_path() -> PathBuf {
     PathBuf::from("persisted-queries.json")
 }
 
+fn default_usage_endpoint() -> String {
+    "http://schema-registry:8090/usage".to_string()
+}
+
+fn default_usage_enabled() -> bool {
+    true
+}
+
 impl Config {
     pub fn load() -> anyhow::Result<Self> {
         let path = std::env::var("ROUTER_CONFIG")
@@ -326,6 +353,14 @@ impl Config {
         if let Ok(v) = std::env::var("ROUTER_ALLOW_ARBITRARY_QUERIES") {
             cfg.persisted_queries.allow_arbitrary_queries =
                 matches!(v.to_lowercase().as_str(), "1" | "true" | "yes");
+        }
+        if let Ok(v) = std::env::var("SCHEMA_REGISTRY_USAGE_ENDPOINT") {
+            if !v.is_empty() {
+                cfg.usage.endpoint = v;
+            }
+        }
+        if let Ok(v) = std::env::var("ROUTER_USAGE_ENABLED") {
+            cfg.usage.enabled = matches!(v.to_lowercase().as_str(), "1" | "true" | "yes");
         }
         Ok(cfg)
     }

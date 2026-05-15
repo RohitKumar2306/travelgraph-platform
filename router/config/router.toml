@@ -79,3 +79,7 @@ identity_signature_secret = "travelgraph-dev-identity-secret"
 [persisted_queries]
 path = "/app/persisted-queries.json"
 allow_arbitrary_queries = false
+
+[usage]
+endpoint = "http://schema-registry:8090/usage"
+enabled = true

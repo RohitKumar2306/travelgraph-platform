@@ -1,0 +1,37 @@
+server:
+  port: 8090
+
+spring:
+  application:
+    name: schema-registry
+  datasource:
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:travelgraph}?currentSchema=schema_registry
+    username: ${DB_USER:travelgraph}
+    password: ${DB_PASSWORD:travelgraph}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        default_schema: schema_registry
+    open-in-view: false
+  flyway:
+    enabled: true
+    schemas: schema_registry
+    default-schema: schema_registry
+    create-schemas: true
+    locations: classpath:db/migration
+    baseline-on-migrate: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,prometheus,metrics
+
+travelgraph:
+  composer:
+    node-bin: ${COMPOSER_NODE_BIN:node}
+    helper-root: ${COMPOSER_HELPER_ROOT:/app/node-helper}
+  ai:
+    assistant-url: ${AI_SCHEMA_ASSISTANT_URL:http://ai-schema-assistant:8091}

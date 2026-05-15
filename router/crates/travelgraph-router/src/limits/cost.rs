@@ -99,15 +99,20 @@ pub fn analyze(
     let cost = ctx.cost;
 
     if depth > max_depth {
-        return Err(CostLimitError::Depth {
-            depth,
-            max_depth,
-        });
+        return Err(CostLimitError::Depth { depth, max_depth });
     }
     if cost > max_cost {
         return Err(CostLimitError::Cost { cost, max_cost });
     }
     Ok(CostReport { depth, cost })
+}
+
+pub fn estimate(
+    document: &Document,
+    operation_name: Option<&str>,
+    catalog: &SupergraphCatalog,
+) -> Result<CostReport, CostLimitError> {
+    analyze(document, operation_name, catalog, usize::MAX, u32::MAX)
 }
 
 struct Ctx<'a> {
@@ -124,11 +129,7 @@ fn walk_selection(sel: &Selection, depth: usize, ctx: &mut Ctx<'_>) {
             ctx.depth_seen = ctx.depth_seen.max(depth);
             let fname = field.name.as_str();
             let key = format!("{}.{}", ctx.parent_type, fname);
-            let mut field_cost: u32 = if fname.contains("search") {
-                20
-            } else {
-                1
-            };
+            let mut field_cost: u32 = if fname.contains("search") { 20 } else { 1 };
             if let Some(o) = ctx.overrides.get(&key) {
                 field_cost = (*o).clamp(0, i32::MAX) as u32;
             }

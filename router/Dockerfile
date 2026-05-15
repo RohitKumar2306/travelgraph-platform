@@ -30,6 +30,7 @@ RUN mkdir -p crates/travelgraph-router/src \
 
 COPY crates ./crates
 COPY config ./config
+COPY persisted-queries.json ./persisted-queries.json
 
 # Real build. `--locked` is best-effort - we'll regenerate Cargo.lock if it
 # isn't already checked in.
@@ -42,6 +43,7 @@ WORKDIR /app
 
 COPY --from=builder /workspace/target/release/travelgraph-router /app/travelgraph-router
 COPY --from=builder /workspace/config /app/config
+COPY --from=builder /workspace/persisted-queries.json /app/persisted-queries.json
 
 EXPOSE 8080
 

@@ -1,0 +1,15 @@
+<configuration>
+  <appender name="JSON" class="ch.qos.logback.core.ConsoleAppender">
+    <encoder class="net.logstash.logback.encoder.LoggingEventCompositeJsonEncoder">
+      <providers>
+        <timestamp><fieldName>timestamp</fieldName></timestamp>
+        <logLevel><fieldName>level</fieldName></logLevel>
+        <pattern><pattern>{"service":"user-service","trace_id":"%X{traceId:-}","span_id":"%X{spanId:-}","operation_name":"%X{operation_name:-}","client_name":"%X{client_name:-}","user_id":"%X{user_id:-}"}</pattern></pattern>
+        <message><fieldName>message</fieldName></message>
+        <loggerName><fieldName>logger</fieldName></loggerName>
+        <stackTrace><fieldName>stack_trace</fieldName></stackTrace>
+      </providers>
+    </encoder>
+  </appender>
+  <root level="INFO"><appender-ref ref="JSON"/></root>
+</configuration>

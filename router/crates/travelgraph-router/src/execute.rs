@@ -10,6 +10,7 @@ use futures::future::join_all;
 use serde_json::{Map, Value};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use tracing::Instrument;
 
 #[derive(Debug)]
 pub struct InitialFetchResult {
@@ -46,6 +47,10 @@ pub async fn execute(
     variables: Value,
     operation_name: Option<String>,
     identity_headers: Vec<(&'static str, String)>,
+    client_name: String,
+    client_version: String,
+    operation_label: String,
+    user_id: String,
     client: Arc<SubgraphClient>,
 ) -> Vec<FieldFetchResult> {
     let op = plan.operation_kind;
@@ -53,8 +58,26 @@ pub async fn execute(
         let vars = variables.clone();
         let op_name = operation_name.clone();
         let headers = identity_headers.clone();
+        let client_name = client_name.clone();
+        let client_version = client_version.clone();
+        let operation_label = operation_label.clone();
+        let user_id = user_id.clone();
         let c = client.clone();
-        async move { execute_field(f, vars, op_name, headers, op, c).await }
+        async move {
+            execute_field(
+                f,
+                vars,
+                op_name,
+                headers,
+                client_name,
+                client_version,
+                operation_label,
+                user_id,
+                op,
+                c,
+            )
+            .await
+        }
     });
     join_all(futures).await
 }
@@ -64,6 +87,10 @@ async fn execute_field(
     variables: Value,
     operation_name: Option<String>,
     identity_headers: Vec<(&'static str, String)>,
+    client_name: String,
+    client_version: String,
+    operation_label: String,
+    user_id: String,
     op_kind: OperationKind,
     client: Arc<SubgraphClient>,
 ) -> FieldFetchResult {
@@ -74,16 +101,31 @@ async fn execute_field(
         &pruned_vars,
         operation_name.as_deref(),
     );
-    let init_outcome = client
-        .send(SubgraphHttpCall {
-            subgraph: field.initial.subgraph.clone(),
-            url: field.initial.url.clone(),
-            body,
-            headers: identity_headers.clone(),
-            timeout: field.initial.timeout,
-            operation: op_kind,
-        })
-        .await;
+    let init_outcome = {
+        let span = tracing::info_span!(
+            "graphql.subgraph_call",
+            subgraph = %field.initial.subgraph,
+            client_name = %client_name,
+            client_version = %client_version,
+            operation_name = %operation_label,
+            user_id = %user_id
+        );
+        client
+            .send(SubgraphHttpCall {
+                subgraph: field.initial.subgraph.clone(),
+                url: field.initial.url.clone(),
+                body,
+                headers: identity_headers.clone(),
+                client_name: client_name.clone(),
+                client_version: client_version.clone(),
+                operation_name: operation_label.clone(),
+                user_id: user_id.clone(),
+                timeout: field.initial.timeout,
+                operation: op_kind,
+            })
+            .instrument(span)
+            .await
+    };
     let init_duration = init_start.elapsed();
     let initial = InitialFetchResult {
         plan: field.initial.clone(),
@@ -137,6 +179,10 @@ async fn execute_field(
         let representations = representations.clone();
         let entity_refs = entity_refs.clone();
         let headers = identity_headers.clone();
+        let client_name = client_name.clone();
+        let client_version = client_version.clone();
+        let operation_label = operation_label.clone();
+        let user_id = user_id.clone();
         let c = client.clone();
         async move {
             let query = format!(
@@ -151,16 +197,31 @@ async fn execute_field(
             });
             let body_bytes = build_body(&query, &vars, None);
             let start = Instant::now();
-            let outcome = c
-                .send(SubgraphHttpCall {
+            let outcome = {
+                let span = tracing::info_span!(
+                    "graphql.entity_resolution",
+                    subgraph = %ef.subgraph,
+                    entity_type = %ef.type_name,
+                    client_name = %client_name,
+                    client_version = %client_version,
+                    operation_name = %operation_label,
+                    user_id = %user_id
+                );
+                c.send(SubgraphHttpCall {
                     subgraph: ef.subgraph.clone(),
                     url: ef.url.clone(),
                     body: body_bytes,
                     headers,
+                    client_name,
+                    client_version,
+                    operation_name: operation_label,
+                    user_id,
                     timeout: ef.timeout,
                     operation: OperationKind::Query,
                 })
-                .await;
+                .instrument(span)
+                .await
+            };
             EntityFetchResult {
                 plan: ef,
                 duration: start.elapsed(),

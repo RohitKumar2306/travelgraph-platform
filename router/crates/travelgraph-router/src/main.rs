@@ -29,16 +29,21 @@ mod rate_limit;
 mod reliability;
 mod server;
 mod supergraph;
+mod usage;
 
 use anyhow::Context;
+use opentelemetry::KeyValue;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::{propagation::TraceContextPropagator, trace as sdktrace, Resource};
 use std::net::SocketAddr;
+use tracing_opentelemetry::OpenTelemetryLayer;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    init_tracing();
+    init_tracing().context("initializing tracing")?;
     metrics::init_prometheus().context("prometheus metrics")?;
 
     let mut config = config::Config::load().context("loading router config")?;
@@ -62,14 +67,34 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn init_tracing() {
+fn init_tracing() -> anyhow::Result<()> {
+    opentelemetry::global::set_text_map_propagator(TraceContextPropagator::new());
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let json_layer = tracing_subscriber::fmt::layer()
         .json()
         .with_current_span(true)
         .with_span_list(false);
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(json_layer)
-        .init();
+    let registry = tracing_subscriber::registry().with(filter).with(json_layer);
+
+    if let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") {
+        let exporter = opentelemetry_otlp::new_exporter()
+            .tonic()
+            .with_endpoint(endpoint);
+        let tracer = opentelemetry_otlp::new_pipeline()
+            .tracing()
+            .with_exporter(exporter)
+            .with_trace_config(sdktrace::config().with_resource(Resource::new(vec![
+                KeyValue::new("service.name", "travelgraph-router"),
+            ])))
+            .install_batch(opentelemetry_sdk::runtime::Tokio)?;
+        registry
+            .with(OpenTelemetryLayer::new(tracer))
+            .try_init()
+            .map_err(|e| anyhow::anyhow!("tracing subscriber: {e}"))?;
+    } else {
+        registry
+            .try_init()
+            .map_err(|e| anyhow::anyhow!("tracing subscriber: {e}"))?;
+    }
+    Ok(())
 }

@@ -12,11 +12,13 @@ name: travelgraph
 
 x-subgraph-env: &subgraph-env
   SPRING_PROFILES_ACTIVE: dev
+  OTEL_COLLECTOR_HOST: otel-collector
   DB_HOST: postgres
   DB_PORT: "5432"
   DB_NAME: travelgraph
   DB_USER: travelgraph
   DB_PASSWORD: travelgraph
+  SCHEMA_REGISTRY_URL: http://schema-registry:8090
 
 services:
   postgres:
@@ -43,70 +45,113 @@ services:
     ports:
       - "6379:6379"
 
+  schema-registry:
+    build:
+      context: ./schema-registry/registry
+    image: travelgraph/schema-registry:dev
+    container_name: travelgraph-schema-registry
+    profiles: ["subgraphs", "schema-platform", "observability"]
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_NAME: travelgraph
+      DB_USER: travelgraph
+      DB_PASSWORD: travelgraph
+      COMPOSER_NODE_BIN: node
+      COMPOSER_HELPER_ROOT: /app/node-helper
+      AI_SCHEMA_ASSISTANT_URL: http://ai-schema-assistant:8091
+    ports:
+      - "8090:8090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  ai-schema-assistant:
+    build:
+      context: ./ai-schema-assistant
+    image: travelgraph/ai-schema-assistant:dev
+    container_name: travelgraph-ai-schema-assistant
+    profiles: ["schema-platform", "observability"]
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-3-5-sonnet-latest}
+    ports:
+      - "8091:8091"
+
   property-service:
     build:
       context: ./services/property-service
     image: travelgraph/property-service:dev
     container_name: travelgraph-property
-    profiles: ["subgraphs"]
+    profiles: ["subgraphs", "observability"]
     environment: *subgraph-env
     ports:
       - "8081:8081"
     depends_on:
       postgres:
         condition: service_healthy
+      schema-registry:
+        condition: service_started
 
   pricing-service:
     build:
       context: ./services/pricing-service
     image: travelgraph/pricing-service:dev
     container_name: travelgraph-pricing
-    profiles: ["subgraphs"]
+    profiles: ["subgraphs", "observability"]
     environment: *subgraph-env
     ports:
       - "8082:8082"
     depends_on:
       postgres:
         condition: service_healthy
+      schema-registry:
+        condition: service_started
 
   booking-service:
     build:
       context: ./services/booking-service
     image: travelgraph/booking-service:dev
     container_name: travelgraph-booking
-    profiles: ["subgraphs"]
+    profiles: ["subgraphs", "observability"]
     environment: *subgraph-env
     ports:
       - "8083:8083"
     depends_on:
       postgres:
         condition: service_healthy
+      schema-registry:
+        condition: service_started
 
   user-service:
     build:
       context: ./services/user-service
     image: travelgraph/user-service:dev
     container_name: travelgraph-user
-    profiles: ["subgraphs"]
+    profiles: ["subgraphs", "observability"]
     environment: *subgraph-env
     ports:
       - "8084:8084"
     depends_on:
       postgres:
         condition: service_healthy
+      schema-registry:
+        condition: service_started
 
   review-service:
     build:
       context: ./services/review-service
     image: travelgraph/review-service:dev
     container_name: travelgraph-review
-    profiles: ["subgraphs"]
+    profiles: ["subgraphs", "observability"]
     environment: *subgraph-env
     ports:
       - "8085:8085"
     depends_on:
       postgres:
         condition: service_healthy
+      schema-registry:
+        condition: service_started
 
   # ---------------------------------------------------------------------------
   # Phase 3: schema composer. Profile `composer` runs the supergraph composer
@@ -152,7 +197,7 @@ services:
       context: ./router
     image: travelgraph/router:dev
     container_name: travelgraph-router
-    profiles: ["router"]
+    profiles: ["router", "observability"]
     ports:
       - "8080:8080"
     volumes:
@@ -165,6 +210,9 @@ services:
       ROUTER_CONFIG: /app/config/router.toml
       ROUTER_REDIS_URL: redis://redis:6379
       ROUTER_CACHE_ENABLED: "true"
+      ROUTER_ALLOW_ARBITRARY_QUERIES: "true"
+      SCHEMA_REGISTRY_USAGE_ENDPOINT: http://schema-registry:8090/usage
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
     depends_on:
       redis:
         condition: service_started
@@ -177,6 +225,66 @@ services:
       user-service:
         condition: service_started
       review-service:
+        condition: service_started
+      schema-registry:
+        condition: service_started
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.104.0
+    container_name: travelgraph-otel-collector
+    profiles: ["observability"]
+    command: ["--config=/etc/otelcol-contrib/config.yml"]
+    volumes:
+      - ./observability/otel-collector.yml:/etc/otelcol-contrib/config.yml:ro
+    ports:
+      - "4317:4317"
+      - "4318:4318"
+      - "8888:8888"
+      - "8889:8889"
+    depends_on:
+      jaeger:
+        condition: service_started
+
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: travelgraph-prometheus
+    profiles: ["observability"]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=6h
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    container_name: travelgraph-jaeger
+    profiles: ["observability"]
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+      - "14250:14250"
+      - "4319:4317"
+
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: travelgraph-grafana
+    profiles: ["observability"]
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_DEFAULT_THEME: light
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana-dashboard.json:/var/lib/grafana/dashboards/travelgraph-platform.json:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      prometheus:
+        condition: service_started
+      jaeger:
         condition: service_started
 
 volumes:

@@ -1,7 +1,7 @@
 //! Request-scoped logging helpers.
 //!
 //! Every `/graphql` request is wrapped in an `info_span!("graphql_request",
-//! request_id, operation_name)`. After execution we record:
+//! request_id, operation_name, client_name, client_version, user_id)`. After execution we record:
 //!
 //!   * total_duration_ms       - on the span itself
 //!   * subgraph_durations_ms   - one structured event with the full map
@@ -19,12 +19,20 @@ pub struct RequestSpanGuard {
     pub request_id: String,
 }
 
-pub fn open_request_span(operation_name: Option<&str>) -> RequestSpanGuard {
+pub fn open_request_span(
+    operation_name: Option<&str>,
+    client_name: &str,
+    client_version: &str,
+    user_id: &str,
+) -> RequestSpanGuard {
     let request_id = Uuid::new_v4().to_string();
     let span = tracing::info_span!(
         "graphql_request",
         request_id = %request_id,
+        client_name = %client_name,
+        client_version = %client_version,
         operation_name = operation_name.unwrap_or("<anonymous>"),
+        user_id = %user_id,
         total_duration_ms = Empty,
     );
     RequestSpanGuard { span, request_id }

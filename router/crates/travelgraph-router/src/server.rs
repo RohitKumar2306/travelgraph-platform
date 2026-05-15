@@ -27,7 +27,7 @@ use crate::config::Config;
 use crate::execute::execute;
 use crate::graphql::types::{GraphQLRequest, GraphQLResponse};
 use crate::graphql::{parse, validate};
-use crate::limits::analyze_cost;
+use crate::limits::{analyze_cost, estimate_cost};
 use crate::logging::{open_request_span, record_request_completion};
 use crate::merge::merge;
 use crate::persisted_queries::{PersistedQueryDecision, PersistedQueryStore};
@@ -45,6 +45,7 @@ pub struct AppState {
     pub cache: Option<Arc<ResponseCache>>,
     pub rate_limit: Arc<ClientRateLimiter>,
     pub persisted_queries: Arc<PersistedQueryStore>,
+    pub usage_http: reqwest::Client,
 }
 
 pub async fn build(config: Config) -> anyhow::Result<Router> {
@@ -68,7 +69,7 @@ pub async fn build(config: Config) -> anyhow::Result<Router> {
         catalog.subgraphs.keys().cloned(),
         brk_cfg,
     ));
-    let subgraph = Arc::new(SubgraphClient::new(http, breakers, &config.reliability));
+    let subgraph = Arc::new(SubgraphClient::new(http.clone(), breakers, &config.reliability));
 
     let cache = if config.cache.enabled && !config.cache.redis_url.is_empty() {
         Some(ResponseCache::connect(&config.cache).await?.into_shared())
@@ -91,6 +92,7 @@ pub async fn build(config: Config) -> anyhow::Result<Router> {
         cache,
         rate_limit: Arc::new(ClientRateLimiter::new(&rate_limit_cfg)),
         persisted_queries: Arc::new(persisted_queries),
+        usage_http: http,
     };
 
     let rl = state.clone();
@@ -169,50 +171,103 @@ async fn graphql(
     headers: HeaderMap,
     Json(mut req): Json<GraphQLRequest>,
 ) -> impl IntoResponse {
-    let span_guard = open_request_span(req.operation_name.as_deref());
+    let identity = crate::auth::Identity::from_headers(&headers, &state.config.auth.jwt_secret);
+    let client_name = header_value(&headers, "apollographql-client-name", "__anonymous__");
+    let client_version = header_value(&headers, "apollographql-client-version", "__unknown__");
+    let operation_label = operation_label(req.operation_name.as_deref());
+    let span_guard = open_request_span(
+        req.operation_name.as_deref(),
+        &client_name,
+        &client_version,
+        &identity.sub,
+    );
     let request_id = span_guard.request_id.clone();
     let span = span_guard.span;
 
     async move {
         let start = Instant::now();
-        let identity = crate::auth::Identity::from_headers(&headers, &state.config.auth.jwt_secret);
         let identity_headers =
             identity.signed_headers(&state.config.auth.identity_signature_secret);
 
-        match state.persisted_queries.resolve(
-            Some(req.query.as_str()).filter(|query| !query.trim().is_empty()),
-            req.extensions.as_ref(),
-            state.config.persisted_queries.allow_arbitrary_queries,
-        ) {
-            Ok(PersistedQueryDecision::UseStored(query)) => req.query = query.to_string(),
-            Ok(PersistedQueryDecision::UseRequestQuery) => {}
-            Err(error) => {
-                let body = GraphQLResponse {
-                    data: None,
-                    errors: vec![error],
-                    extensions: None,
-                };
-                return (StatusCode::OK, Json(body)).into_response();
+        {
+            let _span = tracing::info_span!(
+                "graphql.persisted_query",
+                client_name = %client_name,
+                client_version = %client_version,
+                operation_name = %operation_label,
+                user_id = %identity.sub
+            )
+            .entered();
+            match state.persisted_queries.resolve(
+                Some(req.query.as_str()).filter(|query| !query.trim().is_empty()),
+                req.extensions.as_ref(),
+                state.config.persisted_queries.allow_arbitrary_queries,
+            ) {
+                Ok(PersistedQueryDecision::UseStored(query)) => req.query = query.to_string(),
+                Ok(PersistedQueryDecision::UseRequestQuery) => {}
+                Err(error) => {
+                    crate::metrics::record_graphql_request(
+                        &operation_label,
+                        "persisted_query_error",
+                        start.elapsed(),
+                    );
+                    let body = GraphQLResponse {
+                        data: None,
+                        errors: vec![error],
+                        extensions: None,
+                    };
+                    return (StatusCode::OK, Json(body)).into_response();
+                }
             }
         }
 
-        // ---- parse (Phase 2.2) ---------------------------------------------
-        let parsed = match parse::parse(&req.query) {
-            Ok(p) => p,
-            Err(errors) => {
-                let body = GraphQLResponse {
-                    data: None,
-                    errors,
-                    extensions: None,
-                };
-                tracing::warn!("parse error");
-                return (StatusCode::BAD_REQUEST, Json(body)).into_response();
+        // ---- parse (Phase 2.2 / 6.1) --------------------------------------
+        let parsed = {
+            let _span = tracing::info_span!(
+                "graphql.parse",
+                client_name = %client_name,
+                client_version = %client_version,
+                operation_name = %operation_label,
+                user_id = %identity.sub
+            )
+            .entered();
+            match parse::parse(&req.query) {
+                Ok(p) => p,
+                Err(errors) => {
+                    crate::metrics::record_graphql_request(
+                        &operation_label,
+                        "parse_error",
+                        start.elapsed(),
+                    );
+                    let body = GraphQLResponse {
+                        data: None,
+                        errors,
+                        extensions: None,
+                    };
+                    tracing::warn!("parse error");
+                    return (StatusCode::BAD_REQUEST, Json(body)).into_response();
+                }
             }
         };
 
-        // ---- validate (Phase 2.2) ------------------------------------------
-        let validation_errors = validate::validate(&parsed.document);
+        // ---- validate (Phase 2.2 / 6.1) -----------------------------------
+        let validation_errors = {
+            let _span = tracing::info_span!(
+                "graphql.validate",
+                client_name = %client_name,
+                client_version = %client_version,
+                operation_name = %operation_label,
+                user_id = %identity.sub
+            )
+            .entered();
+            validate::validate(&parsed.document)
+        };
         if !validation_errors.is_empty() {
+            crate::metrics::record_graphql_request(
+                &operation_label,
+                "validation_error",
+                start.elapsed(),
+            );
             let body = GraphQLResponse {
                 data: None,
                 errors: validation_errors,
@@ -220,6 +275,14 @@ async fn graphql(
             };
             tracing::warn!("validation error");
             return (StatusCode::OK, Json(body)).into_response();
+        }
+
+        if let Ok(report) = estimate_cost(
+            &parsed.document,
+            req.operation_name.as_deref(),
+            &state.catalog,
+        ) {
+            crate::metrics::record_query_complexity(report.cost);
         }
 
         // ---- Redis cache (read path, Phase 4.2) ---------------------------
@@ -235,6 +298,11 @@ async fn graphql(
                     Ok(Some(bytes)) => match serde_json::from_slice::<GraphQLResponse>(&bytes) {
                         Ok(resp) => {
                             tracing::info!(cache = "hit", key = %key, "graphql response cache");
+                            crate::metrics::record_graphql_request(
+                                &operation_label,
+                                "cache_hit",
+                                start.elapsed(),
+                            );
                             return (StatusCode::OK, Json(resp)).into_response();
                         }
                         Err(e) => tracing::warn!(key = %key, %e, "cache entry decode failed"),
@@ -246,13 +314,29 @@ async fn graphql(
         }
 
         // ---- depth / complexity (Phase 4.3) -------------------------------
-        if let Err(e) = analyze_cost(
-            &parsed.document,
-            req.operation_name.as_deref(),
-            &state.catalog,
-            state.config.limits.max_depth,
-            state.config.limits.max_cost,
-        ) {
+        let cost_result = {
+            let _span = tracing::info_span!(
+                "graphql.cost_limit",
+                client_name = %client_name,
+                client_version = %client_version,
+                operation_name = %operation_label,
+                user_id = %identity.sub
+            )
+            .entered();
+            analyze_cost(
+                &parsed.document,
+                req.operation_name.as_deref(),
+                &state.catalog,
+                state.config.limits.max_depth,
+                state.config.limits.max_cost,
+            )
+        };
+        if let Err(e) = cost_result {
+            crate::metrics::record_graphql_request(
+                &operation_label,
+                "cost_limit_error",
+                start.elapsed(),
+            );
             let body = GraphQLResponse {
                 data: None,
                 errors: vec![e.into_graphql()],
@@ -261,37 +345,93 @@ async fn graphql(
             return (StatusCode::OK, Json(body)).into_response();
         }
 
-        // ---- plan against the supergraph (Phase 3.3) -----------------------
-        let plan = match plan_operation(
-            &parsed.document,
-            req.operation_name.as_deref(),
-            &state.catalog,
-        ) {
-            Ok(p) => p,
-            Err(e) => {
-                let body = GraphQLResponse {
-                    data: None,
-                    errors: vec![e.into_graphql()],
-                    extensions: None,
-                };
-                return (StatusCode::OK, Json(body)).into_response();
+        // ---- plan against the supergraph (Phase 3.3 / 6.1) ----------------
+        let plan = {
+            let _span = tracing::info_span!(
+                "graphql.plan",
+                client_name = %client_name,
+                client_version = %client_version,
+                operation_name = %operation_label,
+                user_id = %identity.sub
+            )
+            .entered();
+            match plan_operation(
+                &parsed.document,
+                req.operation_name.as_deref(),
+                &state.catalog,
+            ) {
+                Ok(p) => p,
+                Err(e) => {
+                    crate::metrics::record_graphql_request(
+                        &operation_label,
+                        "plan_error",
+                        start.elapsed(),
+                    );
+                    let body = GraphQLResponse {
+                        data: None,
+                        errors: vec![e.into_graphql()],
+                        extensions: None,
+                    };
+                    return (StatusCode::OK, Json(body)).into_response();
+                }
             }
         };
 
         log_plan(&plan);
 
-        // ---- execute + entity stitching (Phase 3.4 / 4.1) ----------------
+        // ---- execute + entity stitching (Phase 3.4 / 4.1 / 6.1) ----------
         let plan_for_cache = plan.clone();
         let results = execute(
             plan,
             req.variables.clone(),
             req.operation_name.clone(),
             identity_headers,
+            client_name.clone(),
+            client_version.clone(),
+            operation_label.clone(),
+            identity.sub.clone(),
             state.subgraph.clone(),
         )
         .await;
-        let merged = merge(results);
+        let merged = {
+            let _span = tracing::info_span!(
+                "graphql.response_merge",
+                client_name = %client_name,
+                client_version = %client_version,
+                operation_name = %operation_label,
+                user_id = %identity.sub
+            )
+            .entered();
+            merge(results)
+        };
         let total = start.elapsed();
+        let status = if merged.response.errors.is_empty() {
+            "ok"
+        } else {
+            "graphql_error"
+        };
+        crate::metrics::record_graphql_request(&operation_label, status, total);
+        if status == "ok" && state.config.usage.enabled {
+            let events = crate::usage::collect_usage_events(
+                &parsed.document,
+                &plan_for_cache,
+                &state.catalog,
+                &operation_label,
+                &client_name,
+                &client_version,
+            );
+            if !events.is_empty() {
+                if let Err(e) = state
+                    .usage_http
+                    .post(&state.config.usage.endpoint)
+                    .json(&events)
+                    .send()
+                    .await
+                {
+                    tracing::warn!(error = %e, "field usage publication failed");
+                }
+            }
+        }
         record_request_completion(
             &tracing::Span::current(),
             &request_id,
@@ -330,6 +470,27 @@ async fn graphql(
     }
     .instrument(span)
     .await
+}
+
+/*
+ * The old linear pipeline is intentionally kept out of the function body by
+ * the phase 6 span blocks above.
+ */
+#[allow(dead_code)]
+fn _phase6_marker() {}
+
+fn header_value(headers: &HeaderMap, name: &str, fallback: &str) -> String {
+    headers
+        .get(name)
+        .and_then(|h| h.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or(fallback)
+        .to_string()
+}
+
+fn operation_label(operation_name: Option<&str>) -> String {
+    operation_name.unwrap_or("<anonymous>").to_string()
 }
 
 fn response_cacheable(
