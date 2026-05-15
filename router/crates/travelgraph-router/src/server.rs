@@ -69,7 +69,11 @@ pub async fn build(config: Config) -> anyhow::Result<Router> {
         catalog.subgraphs.keys().cloned(),
         brk_cfg,
     ));
-    let subgraph = Arc::new(SubgraphClient::new(http.clone(), breakers, &config.reliability));
+    let subgraph = Arc::new(SubgraphClient::new(
+        http.clone(),
+        breakers,
+        &config.reliability,
+    ));
 
     let cache = if config.cache.enabled && !config.cache.redis_url.is_empty() {
         Some(ResponseCache::connect(&config.cache).await?.into_shared())
@@ -174,6 +178,8 @@ async fn graphql(
     let identity = crate::auth::Identity::from_headers(&headers, &state.config.auth.jwt_secret);
     let client_name = header_value(&headers, "apollographql-client-name", "__anonymous__");
     let client_version = header_value(&headers, "apollographql-client-version", "__unknown__");
+    let bypass_cache =
+        header_value(&headers, "x-bypass-cache", "false").eq_ignore_ascii_case("true");
     let operation_label = operation_label(req.operation_name.as_deref());
     let span_guard = open_request_span(
         req.operation_name.as_deref(),
@@ -286,31 +292,40 @@ async fn graphql(
         }
 
         // ---- Redis cache (read path, Phase 4.2) ---------------------------
-        if let Some(cache) = state.cache.as_ref() {
-            if cache.enabled() {
-                let key = ResponseCache::cache_key(
-                    &req.query,
-                    req.operation_name.as_deref(),
-                    &req.variables,
-                    &identity.sub,
-                );
-                match cache::try_get(Some(cache), &key).await {
-                    Ok(Some(bytes)) => match serde_json::from_slice::<GraphQLResponse>(&bytes) {
-                        Ok(resp) => {
-                            tracing::info!(cache = "hit", key = %key, "graphql response cache");
-                            crate::metrics::record_graphql_request(
-                                &operation_label,
-                                "cache_hit",
-                                start.elapsed(),
-                            );
-                            return (StatusCode::OK, Json(resp)).into_response();
+        if !bypass_cache {
+            if let Some(cache) = state.cache.as_ref() {
+                if cache.enabled() {
+                    let key = ResponseCache::cache_key(
+                        &req.query,
+                        req.operation_name.as_deref(),
+                        &req.variables,
+                        &identity.sub,
+                    );
+                    match cache::try_get(Some(cache), &key).await {
+                        Ok(Some(bytes)) => match serde_json::from_slice::<GraphQLResponse>(&bytes)
+                        {
+                            Ok(resp) => {
+                                tracing::info!(cache = "hit", key = %key, "graphql response cache");
+                                crate::metrics::record_graphql_request(
+                                    &operation_label,
+                                    "cache_hit",
+                                    start.elapsed(),
+                                );
+                                return (StatusCode::OK, Json(resp)).into_response();
+                            }
+                            Err(e) => {
+                                tracing::warn!(key = %key, %e, "cache entry decode failed")
+                            }
+                        },
+                        Ok(None) => {}
+                        Err(e) => {
+                            tracing::warn!(key = %key, %e, "redis GET failed; continuing")
                         }
-                        Err(e) => tracing::warn!(key = %key, %e, "cache entry decode failed"),
-                    },
-                    Ok(None) => {}
-                    Err(e) => tracing::warn!(key = %key, %e, "redis GET failed; continuing"),
+                    }
                 }
             }
+        } else {
+            tracing::info!("graphql response cache bypass requested");
         }
 
         // ---- depth / complexity (Phase 4.3) -------------------------------
@@ -440,7 +455,7 @@ async fn graphql(
         );
 
         // ---- cache successful read operations (Phase 4.2) -----------------
-        if response_cacheable(
+        if !bypass_cache && response_cacheable(
             &plan_for_cache,
             Some(identity.sub.as_str()),
             &merged.response,
