@@ -22,6 +22,10 @@ pub struct Config {
     pub limits: LimitsConfig,
     #[serde(default)]
     pub rate_limit: RateLimitConfig,
+    #[serde(default)]
+    pub auth: AuthConfig,
+    #[serde(default)]
+    pub persisted_queries: PersistedQueriesConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -98,9 +102,6 @@ pub struct CacheConfig {
     pub enabled: bool,
     #[serde(default)]
     pub redis_url: String,
-    /// Header whose value is folded into the cache key (Phase 4 stand-in for JWT sub).
-    #[serde(default = "default_identity_header")]
-    pub identity_header: String,
     #[serde(default = "default_ttl_property_read_sec")]
     pub ttl_property_read_sec: u64,
     #[serde(default = "default_ttl_search_sec")]
@@ -116,7 +117,6 @@ impl Default for CacheConfig {
         Self {
             enabled: false,
             redis_url: String::new(),
-            identity_header: default_identity_header(),
             ttl_property_read_sec: default_ttl_property_read_sec(),
             ttl_search_sec: default_ttl_search_sec(),
             ttl_pricing_sec: default_ttl_pricing_sec(),
@@ -169,6 +169,40 @@ pub struct ClientRateLimitOverride {
     pub burst: u32,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthConfig {
+    #[serde(default = "default_jwt_secret")]
+    pub jwt_secret: String,
+    #[serde(default = "default_identity_signature_secret")]
+    pub identity_signature_secret: String,
+}
+
+impl Default for AuthConfig {
+    fn default() -> Self {
+        Self {
+            jwt_secret: default_jwt_secret(),
+            identity_signature_secret: default_identity_signature_secret(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PersistedQueriesConfig {
+    #[serde(default = "default_persisted_queries_path")]
+    pub path: PathBuf,
+    #[serde(default)]
+    pub allow_arbitrary_queries: bool,
+}
+
+impl Default for PersistedQueriesConfig {
+    fn default() -> Self {
+        Self {
+            path: default_persisted_queries_path(),
+            allow_arbitrary_queries: false,
+        }
+    }
+}
+
 fn default_timeout_ms() -> u64 {
     1000
 }
@@ -213,10 +247,6 @@ fn default_circuit_open_recovery_sec() -> u64 {
     15
 }
 
-fn default_identity_header() -> String {
-    "x-user-id".to_string()
-}
-
 fn default_ttl_property_read_sec() -> u64 {
     600
 }
@@ -249,6 +279,18 @@ fn default_rl_burst() -> u32 {
     100
 }
 
+fn default_jwt_secret() -> String {
+    "travelgraph-dev-jwt-secret".to_string()
+}
+
+fn default_identity_signature_secret() -> String {
+    "travelgraph-dev-identity-secret".to_string()
+}
+
+fn default_persisted_queries_path() -> PathBuf {
+    PathBuf::from("persisted-queries.json")
+}
+
 impl Config {
     pub fn load() -> anyhow::Result<Self> {
         let path = std::env::var("ROUTER_CONFIG")
@@ -265,6 +307,25 @@ impl Config {
         }
         if let Ok(v) = std::env::var("ROUTER_CACHE_ENABLED") {
             cfg.cache.enabled = matches!(v.to_lowercase().as_str(), "1" | "true" | "yes");
+        }
+        if let Ok(v) = std::env::var("ROUTER_JWT_SECRET") {
+            if !v.is_empty() {
+                cfg.auth.jwt_secret = v;
+            }
+        }
+        if let Ok(v) = std::env::var("TRAVELGRAPH_IDENTITY_SECRET") {
+            if !v.is_empty() {
+                cfg.auth.identity_signature_secret = v;
+            }
+        }
+        if let Ok(v) = std::env::var("ROUTER_PERSISTED_QUERIES_PATH") {
+            if !v.is_empty() {
+                cfg.persisted_queries.path = PathBuf::from(v);
+            }
+        }
+        if let Ok(v) = std::env::var("ROUTER_ALLOW_ARBITRARY_QUERIES") {
+            cfg.persisted_queries.allow_arbitrary_queries =
+                matches!(v.to_lowercase().as_str(), "1" | "true" | "yes");
         }
         Ok(cfg)
     }

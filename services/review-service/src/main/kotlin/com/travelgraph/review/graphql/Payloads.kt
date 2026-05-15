@@ -26,6 +26,12 @@ data class DuplicateReviewError(
     val message: String
 ) : AddReviewPayload
 
+@GraphQLDescription("Returned when a review mutation is attempted without an authenticated identity.")
+data class AuthenticationRequiredError(
+    @GraphQLDescription("Human-readable explanation.")
+    val message: String = "authentication required"
+) : AddReviewPayload
+
 @GraphQLDescription("Aggregate review statistics for a property.")
 data class ReviewSummary(
     @GraphQLDescription("Property the summary is for.")

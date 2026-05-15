@@ -18,6 +18,7 @@ pub struct SubgraphHttpCall {
     pub subgraph: String,
     pub url: String,
     pub body: Vec<u8>,
+    pub headers: Vec<(&'static str, String)>,
     pub timeout: Duration,
     pub operation: OperationKind,
 }
@@ -79,16 +80,12 @@ impl SubgraphClient {
         &self,
         call: SubgraphHttpCall,
     ) -> Result<GraphQLResponse, SubgraphError> {
-        let breaker = self
-            .breakers
-            .get(&call.subgraph)
-            .cloned()
-            .ok_or_else(|| {
-                SubgraphError::Transport(format!(
-                    "no circuit breaker for subgraph \"{}\"",
-                    call.subgraph
-                ))
-            })?;
+        let breaker = self.breakers.get(&call.subgraph).cloned().ok_or_else(|| {
+            SubgraphError::Transport(format!(
+                "no circuit breaker for subgraph \"{}\"",
+                call.subgraph
+            ))
+        })?;
 
         let max_attempts = 1 + self.policy.max_retries;
 
@@ -109,8 +106,11 @@ impl SubgraphClient {
                         && attempt + 1 < max_attempts
                         && retryable_error(&e);
                     if can_retry {
-                        let backoff =
-                            Self::backoff(attempt, self.policy.initial_backoff, self.policy.max_backoff);
+                        let backoff = Self::backoff(
+                            attempt,
+                            self.policy.initial_backoff,
+                            self.policy.max_backoff,
+                        );
                         tracing::debug!(
                             subgraph = %call.subgraph,
                             attempt,
@@ -142,10 +142,12 @@ impl SubgraphClient {
     ) -> Result<GraphQLResponse, SubgraphError> {
         let url = Url::parse(&call.url)
             .map_err(|e| SubgraphError::Transport(format!("invalid subgraph URL: {e}")))?;
-        let request = http
-            .post(url)
-            .header("content-type", "application/json")
-            .body(call.body.clone());
+        let request = http.post(url).header("content-type", "application/json");
+        let request = call
+            .headers
+            .iter()
+            .fold(request, |req, (name, value)| req.header(*name, value));
+        let request = request.body(call.body.clone());
 
         let result = tokio::time::timeout(call.timeout, request.send()).await;
 

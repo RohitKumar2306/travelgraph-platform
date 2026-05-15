@@ -34,6 +34,12 @@ data class PropertyUnavailableError(
     val reason: String
 ) : CreateBookingPayload
 
+@GraphQLDescription("Returned when a booking mutation is attempted without an authenticated identity.")
+data class AuthenticationRequiredError(
+    @GraphQLDescription("Human-readable explanation.")
+    val message: String = "authentication required"
+) : CreateBookingPayload, CancelBookingPayload
+
 // ---------- cancelBooking ---------------------------------------------------
 
 @GraphQLDescription("Result of attempting to cancel a booking.")

@@ -45,14 +45,16 @@ pub async fn execute(
     plan: ExecutionPlan,
     variables: Value,
     operation_name: Option<String>,
+    identity_headers: Vec<(&'static str, String)>,
     client: Arc<SubgraphClient>,
 ) -> Vec<FieldFetchResult> {
     let op = plan.operation_kind;
     let futures = plan.field_fetches.into_iter().map(|f| {
         let vars = variables.clone();
         let op_name = operation_name.clone();
+        let headers = identity_headers.clone();
         let c = client.clone();
-        async move { execute_field(f, vars, op_name, op, c).await }
+        async move { execute_field(f, vars, op_name, headers, op, c).await }
     });
     join_all(futures).await
 }
@@ -61,17 +63,23 @@ async fn execute_field(
     field: FieldFetch,
     variables: Value,
     operation_name: Option<String>,
+    identity_headers: Vec<(&'static str, String)>,
     op_kind: OperationKind,
     client: Arc<SubgraphClient>,
 ) -> FieldFetchResult {
     let init_start = Instant::now();
     let pruned_vars = subset_variables(&variables, &field.initial.variable_names);
-    let body = build_body(&field.initial.query_text, &pruned_vars, operation_name.as_deref());
+    let body = build_body(
+        &field.initial.query_text,
+        &pruned_vars,
+        operation_name.as_deref(),
+    );
     let init_outcome = client
         .send(SubgraphHttpCall {
             subgraph: field.initial.subgraph.clone(),
             url: field.initial.url.clone(),
             body,
+            headers: identity_headers.clone(),
             timeout: field.initial.timeout,
             operation: op_kind,
         })
@@ -84,7 +92,11 @@ async fn execute_field(
     };
 
     if field.entity_fetches.is_empty() {
-        return FieldFetchResult { field, initial, entities: Vec::new() };
+        return FieldFetchResult {
+            field,
+            initial,
+            entities: Vec::new(),
+        };
     }
 
     let entity_refs: Vec<EntityRef> = match &initial.outcome {
@@ -102,7 +114,11 @@ async fn execute_field(
     };
 
     if entity_refs.is_empty() {
-        return FieldFetchResult { field, initial, entities: Vec::new() };
+        return FieldFetchResult {
+            field,
+            initial,
+            entities: Vec::new(),
+        };
     }
 
     let representations: Vec<Value> = entity_refs
@@ -120,6 +136,7 @@ async fn execute_field(
     let entity_futures = field.entity_fetches.iter().cloned().map(|ef| {
         let representations = representations.clone();
         let entity_refs = entity_refs.clone();
+        let headers = identity_headers.clone();
         let c = client.clone();
         async move {
             let query = format!(
@@ -139,6 +156,7 @@ async fn execute_field(
                     subgraph: ef.subgraph.clone(),
                     url: ef.url.clone(),
                     body: body_bytes,
+                    headers,
                     timeout: ef.timeout,
                     operation: OperationKind::Query,
                 })
@@ -153,7 +171,11 @@ async fn execute_field(
     });
     let entities = join_all(entity_futures).await;
 
-    FieldFetchResult { field, initial, entities }
+    FieldFetchResult {
+        field,
+        initial,
+        entities,
+    }
 }
 
 fn build_body(query: &str, variables: &Value, operation_name: Option<&str>) -> Vec<u8> {

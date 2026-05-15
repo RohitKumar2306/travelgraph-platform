@@ -8,6 +8,8 @@
 #   * `[server]`     - listen port + default subgraph timeout
 #   * `[supergraph]` - filesystem path to `supergraph.graphql`
 #   * `[timeouts]`   - optional per-subgraph timeout overrides
+#   * `[auth]`       - dev JWT + identity propagation signing secrets
+#   * `[persisted_queries]` - Apollo persisted query manifest controls
 
 [server]
 port = 8080
@@ -47,7 +49,6 @@ circuit_open_recovery_sec = 15
 [cache]
 enabled = false
 redis_url = "redis://127.0.0.1:6379"
-identity_header = "x-user-id"
 ttl_property_read_sec = 600
 ttl_search_sec = 120
 ttl_pricing_sec = 30
@@ -65,3 +66,16 @@ default_burst = 100
 # Example per-client override (inline tables as map values):
 # [rate_limit.clients]
 # mobile = { requests_per_sec = 200, burst = 200 }
+
+# Phase 5.1: dev-only secrets. Override with ROUTER_JWT_SECRET and
+# TRAVELGRAPH_IDENTITY_SECRET outside local demos.
+[auth]
+jwt_secret = "travelgraph-dev-jwt-secret"
+identity_signature_secret = "travelgraph-dev-identity-secret"
+
+# Phase 5.3: clients should send extensions.persistedQuery.sha256Hash.
+# Enable arbitrary query text only for local development with either
+# --allow-arbitrary-queries or ROUTER_ALLOW_ARBITRARY_QUERIES=true.
+[persisted_queries]
+path = "/app/persisted-queries.json"
+allow_arbitrary_queries = false

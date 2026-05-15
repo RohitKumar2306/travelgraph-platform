@@ -7,13 +7,20 @@ use serde_json::Value;
 /// HTTP body for `POST /graphql`.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct GraphQLRequest {
+    #[serde(default)]
     pub query: String,
-    #[serde(default, skip_serializing_if = "Option::is_none", rename = "operationName")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "operationName"
+    )]
     pub operation_name: Option<String>,
     /// Default to an empty object so subgraphs that strictly type the
     /// `variables` field never see `null` (which some validators reject).
     #[serde(default = "empty_object")]
     pub variables: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<Value>,
 }
 
 fn empty_object() -> Value {

@@ -13,6 +13,7 @@
 //!   * [`rate_limit`]  - per-client governor buckets (Phase 4.4).
 //!   * [`reliability`] - subgraph tower dispatch: timeout, retry, breaker (4.1).
 
+mod auth;
 mod cache;
 mod config;
 mod error;
@@ -22,6 +23,7 @@ mod limits;
 mod logging;
 mod merge;
 mod metrics;
+mod persisted_queries;
 mod plan;
 mod rate_limit;
 mod reliability;
@@ -39,7 +41,10 @@ async fn main() -> anyhow::Result<()> {
     init_tracing();
     metrics::init_prometheus().context("prometheus metrics")?;
 
-    let config = config::Config::load().context("loading router config")?;
+    let mut config = config::Config::load().context("loading router config")?;
+    if std::env::args().any(|arg| arg == "--allow-arbitrary-queries") {
+        config.persisted_queries.allow_arbitrary_queries = true;
+    }
     tracing::info!(
         port = config.server.port,
         supergraph = %config.supergraph.path.display(),

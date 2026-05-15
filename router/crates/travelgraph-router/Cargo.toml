@@ -29,6 +29,9 @@ metrics            = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 sha2               = { workspace = true }
 hex                = { workspace = true }
+hmac               = { workspace = true }
+jsonwebtoken       = { workspace = true }
+time               = { workspace = true }
 once_cell          = { workspace = true }
 parking_lot        = { workspace = true }
 apollo-compiler    = { workspace = true }

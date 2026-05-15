@@ -4,8 +4,9 @@
 //!
 //!   * `GET  /health`  -> 200 OK
 //!   * `GET  /metrics` -> Prometheus exposition
-//!   * `POST /graphql` -> rate limit → parse → validate → cache (optional) →
-//!         depth/cost limits → plan → execute → merge → cache set
+//!   * `POST /graphql` -> rate limit → auth → persisted query lookup →
+//!         parse → validate → cache (optional) → depth/cost limits → plan →
+//!         execute → merge → cache set
 
 use axum::{
     body::Body,
@@ -29,6 +30,7 @@ use crate::graphql::{parse, validate};
 use crate::limits::analyze_cost;
 use crate::logging::{open_request_span, record_request_completion};
 use crate::merge::merge;
+use crate::persisted_queries::{PersistedQueryDecision, PersistedQueryStore};
 use crate::plan::plan_operation;
 use crate::plan::OperationKind;
 use crate::rate_limit::ClientRateLimiter;
@@ -42,6 +44,7 @@ pub struct AppState {
     pub subgraph: Arc<SubgraphClient>,
     pub cache: Option<Arc<ResponseCache>>,
     pub rate_limit: Arc<ClientRateLimiter>,
+    pub persisted_queries: Arc<PersistedQueryStore>,
 }
 
 pub async fn build(config: Config) -> anyhow::Result<Router> {
@@ -68,35 +71,38 @@ pub async fn build(config: Config) -> anyhow::Result<Router> {
     let subgraph = Arc::new(SubgraphClient::new(http, breakers, &config.reliability));
 
     let cache = if config.cache.enabled && !config.cache.redis_url.is_empty() {
-        Some(
-            ResponseCache::connect(&config.cache)
-                .await?
-                .into_shared(),
-        )
+        Some(ResponseCache::connect(&config.cache).await?.into_shared())
     } else {
         None
     };
 
     let rate_limit_cfg = config.rate_limit.clone();
+    let persisted_queries = if config.persisted_queries.path.exists() {
+        PersistedQueryStore::load(&config.persisted_queries.path)?
+    } else if config.persisted_queries.allow_arbitrary_queries {
+        PersistedQueryStore::default()
+    } else {
+        PersistedQueryStore::load(&config.persisted_queries.path)?
+    };
     let state = AppState {
         config: Arc::new(config),
         catalog: Arc::new(catalog),
         subgraph,
         cache,
         rate_limit: Arc::new(ClientRateLimiter::new(&rate_limit_cfg)),
+        persisted_queries: Arc::new(persisted_queries),
     };
 
     let rl = state.clone();
     let app = Router::new()
         .route("/health", get(health))
-        .route(
-            "/metrics",
-            get(|| async { metrics_text() }),
-        )
+        .route("/metrics", get(|| async { metrics_text() }))
         .route(
             "/graphql",
-            post(graphql)
-                .layer(axum::middleware::from_fn_with_state(rl, rate_limit_middleware)),
+            post(graphql).layer(axum::middleware::from_fn_with_state(
+                rl,
+                rate_limit_middleware,
+            )),
         )
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -122,7 +128,10 @@ fn apply_timeout_overrides(catalog: &mut SupergraphCatalog, cfg: &Config) {
 }
 
 fn metrics_text() -> impl IntoResponse {
-    ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], crate::metrics::render_prometheus())
+    (
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        crate::metrics::render_prometheus(),
+    )
 }
 
 async fn rate_limit_middleware(
@@ -158,7 +167,7 @@ async fn health() -> impl IntoResponse {
 async fn graphql(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(req): Json<GraphQLRequest>,
+    Json(mut req): Json<GraphQLRequest>,
 ) -> impl IntoResponse {
     let span_guard = open_request_span(req.operation_name.as_deref());
     let request_id = span_guard.request_id.clone();
@@ -166,13 +175,26 @@ async fn graphql(
 
     async move {
         let start = Instant::now();
-        let identity_header = state.config.cache.identity_header.as_str();
-        let identity = headers
-            .get(identity_header)
-            .and_then(|v| v.to_str().ok())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(ToOwned::to_owned);
+        let identity = crate::auth::Identity::from_headers(&headers, &state.config.auth.jwt_secret);
+        let identity_headers =
+            identity.signed_headers(&state.config.auth.identity_signature_secret);
+
+        match state.persisted_queries.resolve(
+            Some(req.query.as_str()).filter(|query| !query.trim().is_empty()),
+            req.extensions.as_ref(),
+            state.config.persisted_queries.allow_arbitrary_queries,
+        ) {
+            Ok(PersistedQueryDecision::UseStored(query)) => req.query = query.to_string(),
+            Ok(PersistedQueryDecision::UseRequestQuery) => {}
+            Err(error) => {
+                let body = GraphQLResponse {
+                    data: None,
+                    errors: vec![error],
+                    extensions: None,
+                };
+                return (StatusCode::OK, Json(body)).into_response();
+            }
+        }
 
         // ---- parse (Phase 2.2) ---------------------------------------------
         let parsed = match parse::parse(&req.query) {
@@ -201,13 +223,13 @@ async fn graphql(
         }
 
         // ---- Redis cache (read path, Phase 4.2) ---------------------------
-        if let (Some(id), Some(cache)) = (identity.as_deref(), state.cache.as_ref()) {
+        if let Some(cache) = state.cache.as_ref() {
             if cache.enabled() {
                 let key = ResponseCache::cache_key(
                     &req.query,
                     req.operation_name.as_deref(),
                     &req.variables,
-                    id,
+                    &identity.sub,
                 );
                 match cache::try_get(Some(cache), &key).await {
                     Ok(Some(bytes)) => match serde_json::from_slice::<GraphQLResponse>(&bytes) {
@@ -264,6 +286,7 @@ async fn graphql(
             plan,
             req.variables.clone(),
             req.operation_name.clone(),
+            identity_headers,
             state.subgraph.clone(),
         )
         .await;
@@ -277,21 +300,23 @@ async fn graphql(
         );
 
         // ---- cache successful read operations (Phase 4.2) -----------------
-        if response_cacheable(&plan_for_cache, identity.as_deref(), &merged.response) {
-            if let (Some(id), Some(cache)) = (identity.as_deref(), state.cache.as_ref()) {
+        if response_cacheable(
+            &plan_for_cache,
+            Some(identity.sub.as_str()),
+            &merged.response,
+        ) {
+            if let Some(cache) = state.cache.as_ref() {
                 if cache.enabled() {
                     let key = ResponseCache::cache_key(
                         &req.query,
                         req.operation_name.as_deref(),
                         &req.variables,
-                        id,
+                        &identity.sub,
                     );
                     let ttl = cache.ttl_for_plan(&plan_for_cache);
                     match serde_json::to_vec(&merged.response) {
                         Ok(bytes) => {
-                            if let Err(e) =
-                                cache::try_set(Some(cache), &key, ttl, &bytes).await
-                            {
+                            if let Err(e) = cache::try_set(Some(cache), &key, ttl, &bytes).await {
                                 tracing::warn!(key = %key, %e, "redis SET failed");
                             }
                         }
@@ -331,12 +356,9 @@ fn log_plan(plan: &crate::plan::ExecutionPlan) {
         .field_fetches
         .iter()
         .flat_map(|f| {
-            f.entity_fetches.iter().map(move |e| {
-                format!(
-                    "{}.{}->{}",
-                    f.response_key, e.type_name, e.subgraph
-                )
-            })
+            f.entity_fetches
+                .iter()
+                .map(move |e| format!("{}.{}->{}", f.response_key, e.type_name, e.subgraph))
         })
         .collect();
     tracing::debug!(
