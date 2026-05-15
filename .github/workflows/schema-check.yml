@@ -1,0 +1,95 @@
+name: Schema Check
+
+on:
+  pull_request:
+    paths:
+      - "services/**"
+      - "schema-registry/**"
+      - "docs/graphql-conventions.md"
+      - "scripts/ci/schema_check.py"
+      - ".github/workflows/schema-check.yml"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  schema-check:
+    name: Lint and breaking-change check
+    runs-on: ubuntu-latest
+    env:
+      SCHEMA_REGISTRY_URL: http://localhost:8090
+      BREAKING_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'breaking-change-approved') }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Initialize schema check outputs
+        run: |
+          printf '## Schema Check\n\nSchema check did not complete.\n' > schema-check-comment.md
+          printf '{"breakingChanges":[],"lintIssues":[],"checks":[]}\n' > schema-check-result.json
+
+      - name: Start schema registry
+        run: docker compose --profile schema-platform up -d --build postgres schema-registry
+
+      - name: Wait for schema registry
+        run: |
+          for attempt in {1..90}; do
+            code="$(curl -s -o /dev/null -w '%{http_code}' "${SCHEMA_REGISTRY_URL}/supergraph/latest" || true)"
+            if [ "$code" != "000" ]; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose logs schema-registry
+          exit 1
+
+      - name: Run schema checks
+        run: |
+          python3 scripts/ci/schema_check.py \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            --head HEAD \
+            --registry-url "${SCHEMA_REGISTRY_URL}" \
+            --out schema-check-comment.md \
+            --json schema-check-result.json
+
+      - name: Post schema check comment
+        uses: actions/github-script@v7
+        if: always()
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- travelgraph-schema-check -->';
+            const body = marker + '\n' + fs.readFileSync('schema-check-comment.md', 'utf8');
+            const {owner, repo} = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(github.rest.issues.listComments, {owner, repo, issue_number});
+            const previous = comments.find(comment =>
+              comment.user.type === 'Bot' && comment.body && comment.body.includes(marker)
+            );
+            if (previous) {
+              await github.rest.issues.updateComment({owner, repo, comment_id: previous.id, body});
+            } else {
+              await github.rest.issues.createComment({owner, repo, issue_number, body});
+            }
+
+      - name: Enforce breaking-change policy
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          result = json.load(open("schema-check-result.json", encoding="utf-8"))
+          breaking = result.get("breakingChanges", [])
+          approved = os.environ.get("BREAKING_APPROVED", "").lower() == "true"
+          if breaking and not approved:
+              print(f"{len(breaking)} breaking schema change(s) found. Add label breaking-change-approved to override.")
+              sys.exit(1)
+          if breaking and approved:
+              print(f"{len(breaking)} breaking schema change(s) found, but breaking-change-approved label is present.")
+          else:
+              print("No blocking breaking schema changes found.")
+          PY
