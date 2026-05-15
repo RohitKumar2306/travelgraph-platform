@@ -1,0 +1,41 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+images:
+  - name: ghcr.io/travelgraph-platform/travelgraph-router
+    newName: ghcr.io/travelgraph-platform/travelgraph-router
+    newTag: prod
+  - name: ghcr.io/travelgraph-platform/travelgraph-property-service
+    newName: ghcr.io/travelgraph-platform/travelgraph-property-service
+    newTag: prod
+  - name: ghcr.io/travelgraph-platform/travelgraph-pricing-service
+    newName: ghcr.io/travelgraph-platform/travelgraph-pricing-service
+    newTag: prod
+  - name: ghcr.io/travelgraph-platform/travelgraph-booking-service
+    newName: ghcr.io/travelgraph-platform/travelgraph-booking-service
+    newTag: prod
+  - name: ghcr.io/travelgraph-platform/travelgraph-user-service
+    newName: ghcr.io/travelgraph-platform/travelgraph-user-service
+    newTag: prod
+  - name: ghcr.io/travelgraph-platform/travelgraph-review-service
+    newName: ghcr.io/travelgraph-platform/travelgraph-review-service
+    newTag: prod
+  - name: ghcr.io/travelgraph-platform/travelgraph-schema-registry
+    newName: ghcr.io/travelgraph-platform/travelgraph-schema-registry
+    newTag: prod
+patches:
+  - target:
+      kind: Deployment
+      name: router
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2
+  - target:
+      kind: Deployment
+      labelSelector: travelgraph.io/tier=subgraph
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 2

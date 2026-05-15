@@ -1,0 +1,36 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+images:
+  - name: ghcr.io/travelgraph-platform/travelgraph-router
+    newName: ghcr.io/travelgraph-platform/travelgraph-router
+    newTag: latest
+  - name: ghcr.io/travelgraph-platform/travelgraph-property-service
+    newName: ghcr.io/travelgraph-platform/travelgraph-property-service
+    newTag: latest
+  - name: ghcr.io/travelgraph-platform/travelgraph-pricing-service
+    newName: ghcr.io/travelgraph-platform/travelgraph-pricing-service
+    newTag: latest
+  - name: ghcr.io/travelgraph-platform/travelgraph-booking-service
+    newName: ghcr.io/travelgraph-platform/travelgraph-booking-service
+    newTag: latest
+  - name: ghcr.io/travelgraph-platform/travelgraph-user-service
+    newName: ghcr.io/travelgraph-platform/travelgraph-user-service
+    newTag: latest
+  - name: ghcr.io/travelgraph-platform/travelgraph-review-service
+    newName: ghcr.io/travelgraph-platform/travelgraph-review-service
+    newTag: latest
+  - name: ghcr.io/travelgraph-platform/travelgraph-schema-registry
+    newName: ghcr.io/travelgraph-platform/travelgraph-schema-registry
+    newTag: latest
+patches:
+  - target:
+      kind: Deployment
+      name: router
+    patch: |-
+      - op: add
+        path: /spec/template/spec/containers/0/env/-
+        value:
+          name: ROUTER_ALLOW_ARBITRARY_QUERIES
+          value: "true"

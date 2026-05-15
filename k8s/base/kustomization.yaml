@@ -1,0 +1,17 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: travelgraph
+resources:
+  - namespace.yaml
+  - secrets.yaml
+  - configmaps.yaml
+  - postgres.yaml
+  - redis.yaml
+  - schema-registry.yaml
+  - subgraphs.yaml
+  - router.yaml
+  - grafana.yaml
+  - hpa.yaml
+  - ingress.yaml
+  - networkpolicy.yaml
+

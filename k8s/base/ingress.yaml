@@ -1,0 +1,27 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: travelgraph
+  labels:
+    app.kubernetes.io/name: travelgraph
+    app.kubernetes.io/part-of: travelgraph
+spec:
+  rules:
+    - host: travelgraph.local
+      http:
+        paths:
+          - path: /graphql
+            pathType: Prefix
+            backend:
+              service:
+                name: router
+                port:
+                  number: 8080
+          - path: /grafana
+            pathType: Prefix
+            backend:
+              service:
+                name: grafana
+                port:
+                  number: 3000
+

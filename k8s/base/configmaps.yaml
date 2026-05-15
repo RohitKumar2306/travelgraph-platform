@@ -1,0 +1,93 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init
+  labels:
+    app.kubernetes.io/part-of: travelgraph
+data:
+  01-schemas.sql: |
+    CREATE SCHEMA IF NOT EXISTS property_schema;
+    CREATE SCHEMA IF NOT EXISTS pricing_schema;
+    CREATE SCHEMA IF NOT EXISTS booking_schema;
+    CREATE SCHEMA IF NOT EXISTS user_schema;
+    CREATE SCHEMA IF NOT EXISTS review_schema;
+    CREATE SCHEMA IF NOT EXISTS schema_registry;
+
+    GRANT ALL ON SCHEMA property_schema TO travelgraph;
+    GRANT ALL ON SCHEMA pricing_schema  TO travelgraph;
+    GRANT ALL ON SCHEMA booking_schema  TO travelgraph;
+    GRANT ALL ON SCHEMA user_schema     TO travelgraph;
+    GRANT ALL ON SCHEMA review_schema   TO travelgraph;
+    GRANT ALL ON SCHEMA schema_registry TO travelgraph;
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: router-config
+  labels:
+    app.kubernetes.io/name: router
+    app.kubernetes.io/part-of: travelgraph
+data:
+  router.toml: |
+    [server]
+    port = 8080
+    default_subgraph_timeout_ms = 1000
+
+    [supergraph]
+    path = "/app/supergraph/supergraph.graphql"
+
+    [timeouts]
+
+    [http_client]
+    pool_max_idle_per_host = 50
+    pool_idle_timeout_sec = 90
+    tcp_keepalive_sec = 90
+
+    [reliability]
+    retry_max_attempts = 2
+    retry_initial_backoff_ms = 10
+    retry_max_backoff_ms = 250
+    circuit_window_sec = 60
+    circuit_min_samples = 8
+    circuit_failure_ratio = 0.5
+    circuit_open_recovery_sec = 15
+
+    [cache]
+    enabled = true
+    redis_url = "redis://redis:6379"
+    ttl_property_read_sec = 600
+    ttl_search_sec = 120
+    ttl_pricing_sec = 30
+    ttl_review_summary_sec = 300
+
+    [limits]
+    max_depth = 10
+    max_cost = 1000
+
+    [rate_limit]
+    default_requests_per_sec = 100
+    default_burst = 100
+
+    [auth]
+    jwt_secret = "travelgraph-dev-jwt-secret"
+    identity_signature_secret = "travelgraph-dev-identity-secret"
+
+    [persisted_queries]
+    path = "/app/persisted-queries.json"
+    allow_arbitrary_queries = false
+
+    [usage]
+    endpoint = "http://schema-registry:8090/usage"
+    enabled = true
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-config
+  labels:
+    app.kubernetes.io/name: grafana
+    app.kubernetes.io/part-of: travelgraph
+data:
+  GF_SERVER_ROOT_URL: "%(protocol)s://%(domain)s/grafana/"
+  GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+

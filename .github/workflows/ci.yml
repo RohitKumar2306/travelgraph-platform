@@ -120,19 +120,30 @@ jobs:
           curl -fsSL "https://github.com/instrumenta/kubeval/releases/download/0.16.1/kubeval-linux-amd64.tar.gz" | tar xz
           sudo mv kubeval /usr/local/bin/kubeval
 
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.14.4
+
       - name: Validate manifests
         run: |
           if [ ! -d k8s ]; then
             echo "No k8s/ directory found; manifest validation skipped."
             exit 0
           fi
-          kubectl apply --dry-run=client --validate=false -f k8s/
-          mapfile -t manifests < <(find k8s -type f \( -name '*.yaml' -o -name '*.yml' \) | sort)
-          if [ "${#manifests[@]}" -eq 0 ]; then
-            echo "No Kubernetes YAML files found under k8s/."
-            exit 0
+
+          kubectl kustomize k8s/overlays/local > /tmp/travelgraph-local.yaml
+          kubectl kustomize k8s/overlays/prod > /tmp/travelgraph-prod.yaml
+          helm template travelgraph k8s/helm/travelgraph > /tmp/travelgraph-helm.yaml
+
+          if kubectl version --request-timeout=5s >/dev/null 2>&1; then
+            kubectl apply --dry-run=client --validate=false -f /tmp/travelgraph-local.yaml
+            kubectl apply --dry-run=client --validate=false -f /tmp/travelgraph-prod.yaml
+          else
+            echo "No Kubernetes API server is available; rendered manifests will be validated offline."
           fi
-          kubeval --strict "${manifests[@]}"
+
+          kubeval --strict /tmp/travelgraph-local.yaml /tmp/travelgraph-prod.yaml /tmp/travelgraph-helm.yaml
 
   docker-images:
     name: Build ${{ matrix.image }} image

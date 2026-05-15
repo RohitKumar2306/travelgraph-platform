@@ -1,0 +1,114 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: router
+  labels:
+    app.kubernetes.io/name: router
+    app.kubernetes.io/part-of: travelgraph
+spec:
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+  selector:
+    app.kubernetes.io/name: router
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: router
+  labels:
+    app.kubernetes.io/name: router
+    app.kubernetes.io/part-of: travelgraph
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: router
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: router
+        app.kubernetes.io/part-of: travelgraph
+    spec:
+      initContainers:
+        - name: compose-supergraph
+          image: curlimages/curl:8.11.1
+          command:
+            - sh
+            - -ec
+            - |
+              for attempt in $(seq 1 120); do
+                response="$(curl -fsS -X POST http://schema-registry:8090/supergraph/compose || true)"
+                if echo "$response" | grep -q '"ok":true'; then
+                  curl -fsS http://schema-registry:8090/supergraph/latest -o /supergraph/supergraph.graphql
+                  exit 0
+                fi
+                echo "waiting for all subgraph schemas before composing supergraph"
+                sleep 2
+              done
+              echo "schema registry did not compose a supergraph in time"
+              exit 1
+          volumeMounts:
+            - name: supergraph
+              mountPath: /supergraph
+      containers:
+        - name: router
+          image: ghcr.io/travelgraph-platform/travelgraph-router:latest
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: RUST_LOG
+              value: info
+            - name: ROUTER_CONFIG
+              value: /app/config/router.toml
+            - name: ROUTER_REDIS_URL
+              value: redis://redis:6379
+            - name: ROUTER_CACHE_ENABLED
+              value: "true"
+            - name: ROUTER_JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: travelgraph-secrets
+                  key: jwt-signing-key
+            - name: TRAVELGRAPH_IDENTITY_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: travelgraph-secrets
+                  key: identity-hmac-key
+            - name: SCHEMA_REGISTRY_USAGE_ENDPOINT
+              value: http://schema-registry:8090/usage
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 30
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "1"
+              memory: 1Gi
+          volumeMounts:
+            - name: router-config
+              mountPath: /app/config/router.toml
+              subPath: router.toml
+              readOnly: true
+            - name: supergraph
+              mountPath: /app/supergraph
+      volumes:
+        - name: router-config
+          configMap:
+            name: router-config
+        - name: supergraph
+          emptyDir: {}
+
